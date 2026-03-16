@@ -191,16 +191,19 @@ const tusServer = new TusServer({
   },
 });
 
-// ─── Upload page HTML ──────────────────────────────────────────────────
+// ─── File serving ──────────────────────────────────────────────────────
+const APP_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+
 let uploadPageCache = null;
 function getUploadPage() {
-  if (!uploadPageCache) {
-    const pagePath = new URL('./upload.html', import.meta.url).pathname;
-    // Handle Windows paths
-    const cleanPath = pagePath.startsWith('/') && pagePath[2] === ':' ? pagePath.slice(1) : pagePath;
-    uploadPageCache = fs.readFileSync(cleanPath, 'utf8');
-  }
+  if (!uploadPageCache) uploadPageCache = fs.readFileSync(path.join(APP_DIR, 'upload.html'), 'utf8');
   return uploadPageCache;
+}
+
+let adminPageCache = null;
+function getAdminPage() {
+  if (!adminPageCache) adminPageCache = fs.readFileSync(path.join(APP_DIR, 'admin.html'), 'utf8');
+  return adminPageCache;
 }
 
 // ─── HTTP Server ───────────────────────────────────────────────────────
@@ -337,11 +340,8 @@ const server = http.createServer(async (req, res) => {
     // Admin page
     if ((pathname === '/admin' || pathname === '/admin/') && req.method === 'GET') {
       try {
-        const adminPath = new URL('./admin.html', import.meta.url).pathname;
-        const cleanPath = adminPath.startsWith('/') && adminPath[2] === ':' ? adminPath.slice(1) : adminPath;
-        const page = fs.readFileSync(cleanPath, 'utf8');
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(page);
+        res.end(getAdminPage());
       } catch { res.writeHead(500); res.end('Admin page not found'); }
       return;
     }
