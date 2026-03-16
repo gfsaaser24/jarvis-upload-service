@@ -46,6 +46,11 @@
     font-size: 1.1rem;
     font-weight: 500;
   }
+  .header .job-vehicle {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    margin-top: 4px;
+  }
   .status-msg {
     text-align: center;
     padding: 48px 16px;
@@ -130,6 +135,7 @@
   <div class="header">
     <h1>Upload Files</h1>
     <div class="job-name" id="job-name"></div>
+    <div class="job-vehicle" id="job-vehicle"></div>
   </div>
 
   <div class="status-msg" id="loading-state">
@@ -163,6 +169,7 @@
   const errorEl = document.getElementById('error-state');
   const uploadEl = document.getElementById('upload-section');
   const jobNameEl = document.getElementById('job-name');
+  const jobVehicleEl = document.getElementById('job-vehicle');
   const finishSection = document.getElementById('finish-section');
   const finishBtn = document.getElementById('finish-btn');
   const finishStatus = document.getElementById('finish-status');
@@ -193,6 +200,7 @@
       loadingEl.style.display = 'none';
       uploadEl.style.display = 'block';
       jobNameEl.textContent = data.name;
+      if (data.vehicle) jobVehicleEl.textContent = data.vehicle;
       initUppy();
     })
     .catch(() => showError('Could not verify upload link. Please try again.'));

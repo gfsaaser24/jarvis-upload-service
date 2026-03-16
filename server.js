@@ -251,7 +251,7 @@ const server = http.createServer(async (req, res) => {
     if (!payload) {
       res.end(JSON.stringify({ ok: false, error: 'Invalid or expired upload link' }));
     } else {
-      res.end(JSON.stringify({ ok: true, name: payload.name, channelId: payload.ch, itemId: payload.item }));
+      res.end(JSON.stringify({ ok: true, name: payload.name, vehicle: payload.vehicle || null, channelId: payload.ch, itemId: payload.item }));
     }
     return;
   }
