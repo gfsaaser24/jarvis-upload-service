@@ -141,6 +141,10 @@ const tusServer = new TusServer({
   datastore: new FileStore({ directory: UPLOAD_DIR }),
   maxSize: 5 * 1024 * 1024 * 1024, // 5GB max
   respectForwardedHeaders: true,
+  generateUrl(req, { proto, host, path, id }) {
+    // Force HTTPS since we're behind Traefik SSL termination
+    return `https://${req.headers['x-forwarded-host'] || req.headers.host || host}${path}/${id}`;
+  },
   async onUploadCreate(req, res, upload) {
     // Validate token from metadata
     const token = upload.metadata?.token;
