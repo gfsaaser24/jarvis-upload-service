@@ -140,6 +140,7 @@ const tusServer = new TusServer({
   path: '/tus',
   datastore: new FileStore({ directory: UPLOAD_DIR }),
   maxSize: 5 * 1024 * 1024 * 1024, // 5GB max
+  respectForwardedHeaders: true,
   async onUploadCreate(req, res, upload) {
     // Validate token from metadata
     const token = upload.metadata?.token;
