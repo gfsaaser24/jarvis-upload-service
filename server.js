@@ -402,26 +402,29 @@ const server = http.createServer(async (req, res) => {
       const listId = url.searchParams.get('list');
       if (!listId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Missing list' })); return; }
       try {
+        // Get schema to find the Name column index
         const info = await slackApi(SLACK_USER_TOKEN, 'files.info', { file: listId }, true);
         const schema = info.file?.list_metadata?.schema || [];
-        const nameCol = schema.find(c => c.name === 'Name' || c.name === 'Title' || c.type === 'text');
+        const nameColIdx = schema.findIndex(c => c.key === 'name' || c.name === 'Name' || c.name === 'Title');
+        const nameFieldKey = nameColIdx >= 0 ? String(nameColIdx) : '0';
 
-        const items = (info.file?.list_metadata?.items || []).map(item => {
+        // Get items via slackLists.items.list
+        const result = await slackApi(SLACK_USER_TOKEN, 'slackLists.items.list', { list_id: listId, limit: 100 }, true);
+        const items = (result.items || []).map(item => {
           let name = item.id;
-          if (nameCol && item.cells) {
-            const cell = item.cells[nameCol.id];
-            if (cell) {
-              // Extract text from rich_text or plain value
-              const rt = cell.rich_text;
-              if (rt && rt[0]?.elements?.[0]?.elements?.[0]?.text) {
-                name = rt[0].elements[0].elements[0].text;
-              } else if (typeof cell.value === 'string') {
-                name = cell.value;
-              }
+          const field = item.fields?.[nameFieldKey];
+          if (field) {
+            const rt = field.rich_text;
+            if (rt?.[0]?.elements?.[0]?.elements?.[0]?.text) {
+              name = rt[0].elements[0].elements[0].text;
+            } else if (typeof field.value === 'string') {
+              name = field.value;
+            } else if (field.text) {
+              name = field.text;
             }
           }
           return { id: item.id, name };
-        });
+        }).filter(item => item.name !== item.id); // Skip items with no name
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, items, listName: info.file?.title || 'List' }));
       } catch (err) {
