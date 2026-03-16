@@ -406,8 +406,8 @@ const server = http.createServer(async (req, res) => {
         const info = await slackApi(SLACK_USER_TOKEN, 'files.info', { file: listId }, true);
         const schema = info.file?.list_metadata?.schema || [];
         // Find the "Vehicle Year, Make, Model" column ID, fall back to "Name"
-        let targetCol = schema.find(c => c.name && c.name.toLowerCase().includes('vehicle'));
-        if (!targetCol) targetCol = schema.find(c => c.key === 'name' || c.name === 'Name' || c.name === 'Title');
+        let targetCol = schema.find(c => c.name === 'Vehicle Year, Make, Model');
+        if (!targetCol) targetCol = schema.find(c => c.key === 'name');
         const targetColId = targetCol?.id;
 
         // Get items via slackLists.items.list
