@@ -405,7 +405,9 @@ const server = http.createServer(async (req, res) => {
         // Get schema to find the Name column index
         const info = await slackApi(SLACK_USER_TOKEN, 'files.info', { file: listId }, true);
         const schema = info.file?.list_metadata?.schema || [];
-        const nameColIdx = schema.findIndex(c => c.key === 'name' || c.name === 'Name' || c.name === 'Title');
+        // Prefer "Vehicle Year, Make, Model" column, fall back to "Name"
+        let nameColIdx = schema.findIndex(c => c.name && c.name.toLowerCase().includes('vehicle'));
+        if (nameColIdx < 0) nameColIdx = schema.findIndex(c => c.key === 'name' || c.name === 'Name' || c.name === 'Title');
         const nameFieldKey = nameColIdx >= 0 ? String(nameColIdx) : '0';
 
         // Get items via slackLists.items.list
