@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Upload Files</title>
+<link href="https://releases.transloadit.com/uppy/v4.12.1/uppy.min.css" rel="stylesheet">
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --surface2: #0f3460;
+    --text: #e4e4e7;
+    --text-muted: #a1a1aa;
+    --accent: #4ade80;
+    --accent-hover: #22c55e;
+    --error: #f87171;
+    --border: #27272a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .container {
+    width: 100%;
+    max-width: 720px;
+    padding: 24px 16px;
+  }
+  .header {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .header .job-name {
+    color: var(--accent);
+    font-size: 1.1rem;
+    font-weight: 500;
+  }
+  .status-msg {
+    text-align: center;
+    padding: 48px 16px;
+    font-size: 1.1rem;
+  }
+  .status-msg.error { color: var(--error); }
+  .status-msg .spinner {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #uppy-dashboard { margin-bottom: 16px; }
+
+  .finish-section {
+    text-align: center;
+    margin-top: 16px;
+    display: none;
+  }
+  .finish-section.visible { display: block; }
+  .finish-btn {
+    background: var(--accent);
+    color: #000;
+    border: none;
+    padding: 14px 32px;
+    font-size: 1rem;
+    font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .finish-btn:hover { background: var(--accent-hover); }
+  .finish-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .finish-status {
+    margin-top: 12px;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+  }
+
+  .done-section {
+    text-align: center;
+    padding: 48px 16px;
+    display: none;
+  }
+  .done-section.visible { display: block; }
+  .done-section .checkmark {
+    font-size: 3rem;
+    margin-bottom: 16px;
+  }
+  .done-section h2 {
+    font-size: 1.3rem;
+    margin-bottom: 8px;
+    color: var(--accent);
+  }
+  .done-section p {
+    color: var(--text-muted);
+  }
+
+  /* Uppy dark theme overrides */
+  .uppy-Dashboard-inner { background: var(--surface) !important; border-color: var(--border) !important; }
+  .uppy-Dashboard-AddFiles { background: var(--surface) !important; border-color: var(--border) !important; }
+  .uppy-Dashboard-dropFilesHereHint { color: var(--text-muted) !important; }
+  .uppy-DashboardContent-bar { background: var(--surface2) !important; border-color: var(--border) !important; }
+  .uppy-DashboardContent-title { color: var(--text) !important; }
+  .uppy-Dashboard-Item { background: var(--surface2) !important; }
+  .uppy-Dashboard-Item-name { color: var(--text) !important; }
+  .uppy-StatusBar { background: var(--surface2) !important; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Upload Files</h1>
+    <div class="job-name" id="job-name"></div>
+  </div>
+
+  <div class="status-msg" id="loading-state">
+    <span class="spinner"></span> Verifying upload link...
+  </div>
+
+  <div class="status-msg error" id="error-state" style="display:none"></div>
+
+  <div id="upload-section" style="display:none">
+    <div id="uppy-dashboard"></div>
+    <div class="finish-section" id="finish-section">
+      <button class="finish-btn" id="finish-btn" onclick="finishUpload()">Finish &amp; Save to Tracker</button>
+      <div class="finish-status" id="finish-status"></div>
+    </div>
+  </div>
+
+  <div class="done-section" id="done-section">
+    <div class="checkmark">&#10003;</div>
+    <h2>Upload Complete</h2>
+    <p>Files saved to tracker. You can close this page.</p>
+  </div>
+</div>
+
+<script src="https://releases.transloadit.com/uppy/v4.12.1/uppy.min.js"></script>
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('t');
+
+  const loadingEl = document.getElementById('loading-state');
+  const errorEl = document.getElementById('error-state');
+  const uploadEl = document.getElementById('upload-section');
+  const jobNameEl = document.getElementById('job-name');
+  const finishSection = document.getElementById('finish-section');
+  const finishBtn = document.getElementById('finish-btn');
+  const finishStatus = document.getElementById('finish-status');
+  const doneSection = document.getElementById('done-section');
+
+  const completedUploadIds = [];
+  let uppy = null;
+
+  function showError(msg) {
+    loadingEl.style.display = 'none';
+    errorEl.textContent = msg;
+    errorEl.style.display = 'block';
+  }
+
+  if (!token) {
+    showError('No upload token provided. Use the link from Slack.');
+    return;
+  }
+
+  // Verify token
+  fetch('/upload/verify?t=' + encodeURIComponent(token))
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) {
+        showError(data.error || 'This upload link is invalid or expired.');
+        return;
+      }
+      loadingEl.style.display = 'none';
+      uploadEl.style.display = 'block';
+      jobNameEl.textContent = data.name;
+      initUppy();
+    })
+    .catch(() => showError('Could not verify upload link. Please try again.'));
+
+  function initUppy() {
+    uppy = new Uppy.Uppy({
+      restrictions: {
+        maxNumberOfFiles: 50,
+      },
+      autoProceed: true,
+    });
+
+    uppy.use(Uppy.Dashboard, {
+      target: '#uppy-dashboard',
+      inline: true,
+      height: 420,
+      proudlyDisplayPoweredByUppy: false,
+      showProgressDetails: true,
+      theme: 'dark',
+      note: 'Drag and drop files or click to browse. Resumable uploads — large files welcome.',
+    });
+
+    uppy.use(Uppy.Tus, {
+      endpoint: '/tus/',
+      chunkSize: 10 * 1024 * 1024, // 10MB chunks
+      retryDelays: [0, 1000, 3000, 5000, 10000],
+      removeFingerprintOnSuccess: true,
+      onBeforeRequest: (req) => {
+        // Pass token and file info as TUS metadata
+      },
+      metadata: (file) => ({
+        filename: file.name,
+        filetype: file.type || 'application/octet-stream',
+        token: token,
+      }),
+    });
+
+    uppy.on('upload-success', (file, response) => {
+      // Extract TUS upload ID from the upload URL
+      const uploadUrl = response.uploadURL || '';
+      const tusId = uploadUrl.split('/').pop();
+      if (tusId) {
+        completedUploadIds.push(tusId);
+      }
+    });
+
+    uppy.on('complete', (result) => {
+      if (completedUploadIds.length > 0) {
+        finishSection.classList.add('visible');
+      }
+    });
+  }
+
+  window.finishUpload = async function() {
+    if (completedUploadIds.length === 0) return;
+    finishBtn.disabled = true;
+    finishStatus.textContent = 'Saving to tracker...';
+
+    try {
+      const resp = await fetch('/upload/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token, uploadIds: completedUploadIds }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        uploadEl.style.display = 'none';
+        doneSection.classList.add('visible');
+      } else {
+        finishStatus.textContent = 'Error: ' + (data.error || 'Unknown error');
+        finishBtn.disabled = false;
+      }
+    } catch (e) {
+      finishStatus.textContent = 'Network error. Please try again.';
+      finishBtn.disabled = false;
+    }
+  };
+})();
+</script>
+</body>
+</html>
