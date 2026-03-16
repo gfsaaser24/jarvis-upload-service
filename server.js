@@ -429,7 +429,8 @@ const server = http.createServer(async (req, res) => {
             }
           }
           return { id: item.id, name };
-        }).filter(item => item.name !== item.id);
+        }).filter(item => item.name !== item.id)
+          .sort((a, b) => a.name.localeCompare(b.name));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, items, listName: info.file?.title || 'List' }));
       } catch (err) {
