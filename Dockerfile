@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --production
 
-COPY server.js upload.html ./
+COPY server.js upload.html admin.html ./
 
 RUN mkdir -p /tmp/uploads && apk add --no-cache curl
 
