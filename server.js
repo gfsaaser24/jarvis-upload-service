@@ -368,29 +368,31 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // List Slack lists (files of type "list") in a channel
+    // List Slack lists in a channel (via conversations.info → properties.tabs)
     if (pathname === '/admin/lists' && req.method === 'GET') {
       const channelId = url.searchParams.get('channel');
       if (!channelId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Missing channel' })); return; }
       try {
-        // Get channel tabs to find lists
-        const result = await slackApi(SLACK_USER_TOKEN, 'conversations.tabs', { channel: channelId }, true);
-        const lists = (result.tabs || [])
-          .filter(t => t.type === 'list')
-          .map(t => ({ id: t.data?.file_id, name: t.label || 'List' }));
+        const info = await slackApi(SLACK_BOT_TOKEN, 'conversations.info', { channel: channelId }, true);
+        const tabs = info.channel?.properties?.tabs || [];
+        const listTabs = tabs.filter(t => t.type === 'list');
+        // For each list tab, get the title from files.info
+        const lists = [];
+        for (const tab of listTabs) {
+          const fileId = tab.data?.file_id;
+          if (!fileId) continue;
+          let name = tab.label || 'List';
+          try {
+            const fileInfo = await slackApi(SLACK_USER_TOKEN, 'files.info', { file: fileId }, true);
+            if (fileInfo.ok && fileInfo.file?.title) name = fileInfo.file.title;
+          } catch {}
+          lists.push({ id: fileId, name });
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, lists }));
       } catch (err) {
-        // Fallback: search for list files in the channel
-        try {
-          const result = await slackApi(SLACK_USER_TOKEN, 'files.list', { channel: channelId, types: 'list', count: 20 }, true);
-          const lists = (result.files || []).map(f => ({ id: f.id, name: f.title || f.name || 'List' }));
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, lists }));
-        } catch (err2) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err2.message }));
-        }
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
       }
       return;
     }
