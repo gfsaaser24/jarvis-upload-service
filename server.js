@@ -211,7 +211,12 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const pathname = url.pathname;
 
-  // CORS
+  // TUS endpoint — let @tus/server handle everything including CORS
+  if (pathname.startsWith('/tus')) {
+    return tusServer.handle(req, res);
+  }
+
+  // CORS for non-TUS routes
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Upload-Length, Upload-Offset, Upload-Metadata, Tus-Resumable, X-HTTP-Method-Override');
@@ -444,11 +449,6 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
     return;
-  }
-
-  // TUS endpoint — handles /tus and /tus/*
-  if (pathname.startsWith('/tus')) {
-    return tusServer.handle(req, res);
   }
 
   // 404
