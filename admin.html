@@ -205,7 +205,7 @@
     uppy = new Uppy.Uppy({ restrictions: { maxNumberOfFiles: 50 }, autoProceed: true });
     uppy.use(Uppy.Dashboard, {
       target: '#uppy-dashboard', inline: true, height: 400,
-      proudlyDisplayPoweredByUppy: false, showProgressDetails: true, theme: 'dark',
+      proudlyDisplayPoweredByUppy: false, showProgressDetails: false, theme: 'dark',
       note: 'Resumable uploads. Large files welcome.',
     });
     uppy.setMeta({ token: currentToken });
