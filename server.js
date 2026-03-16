@@ -15,6 +15,9 @@ const BUNNY_STORAGE_HOSTNAME = process.env.BUNNY_STORAGE_HOSTNAME || 'storage.bu
 const BUNNY_CDN_HOSTNAME = process.env.BUNNY_CDN_HOSTNAME;
 const JARVIS_CALLBACK_URL = process.env.JARVIS_CALLBACK_URL; // e.g. http://178.156.253.60:7000
 const JARVIS_CALLBACK_TOKEN = process.env.JARVIS_CALLBACK_TOKEN;
+const ADMIN_KEY = process.env.ADMIN_KEY;
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+const SLACK_USER_TOKEN = process.env.SLACK_USER_TOKEN;
 
 // Ensure upload dir exists
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -37,6 +40,38 @@ function validateUploadToken(token) {
     if (!payload.ch || !payload.list || !payload.item) return null;
     return payload;
   } catch { return null; }
+}
+
+// ─── Admin token generation ────────────────────────────────────────────
+function generateUploadToken(channelId, listId, itemId, name) {
+  const payload = { ch: channelId, list: listId, item: itemId, name, ts: Date.now(), exp: Date.now() + 48 * 60 * 60 * 1000 };
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', UPLOAD_SECRET).update(data).digest('hex');
+  return data + '.' + sig;
+}
+
+function validateAdminKey(req) {
+  const url = new URL(req.url, 'http://localhost');
+  const key = url.searchParams.get('key') || req.headers['x-admin-key'];
+  return key && ADMIN_KEY && key === ADMIN_KEY;
+}
+
+// ─── Slack API helper ──────────────────────────────────────────────────
+async function slackApi(token, method, body, useForm) {
+  let payload, contentType;
+  if (useForm) {
+    payload = Object.entries(body).map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(typeof v === 'object' ? JSON.stringify(v) : v)).join('&');
+    contentType = 'application/x-www-form-urlencoded';
+  } else {
+    payload = JSON.stringify(body);
+    contentType = 'application/json; charset=utf-8';
+  }
+  const res = await fetch('https://slack.com/api/' + method, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': contentType },
+    body: payload,
+  });
+  return res.json();
 }
 
 // ─── Bunny Storage upload (server-to-server) ───────────────────────────
@@ -288,6 +323,126 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ ok: false, error: 'Invalid request' }));
       }
     });
+    return;
+  }
+
+  // ─── Admin routes ───────────────────────────────────────────────────
+  if (pathname.startsWith('/admin')) {
+    if (!validateAdminKey(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid admin key' }));
+      return;
+    }
+
+    // Admin page
+    if ((pathname === '/admin' || pathname === '/admin/') && req.method === 'GET') {
+      try {
+        const adminPath = new URL('./admin.html', import.meta.url).pathname;
+        const cleanPath = adminPath.startsWith('/') && adminPath[2] === ':' ? adminPath.slice(1) : adminPath;
+        const page = fs.readFileSync(cleanPath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(page);
+      } catch { res.writeHead(500); res.end('Admin page not found'); }
+      return;
+    }
+
+    // List client channels (private channels the bot is in)
+    if (pathname === '/admin/channels' && req.method === 'GET') {
+      try {
+        const result = await slackApi(SLACK_BOT_TOKEN, 'conversations.list', { types: 'private_channel', limit: 200, exclude_archived: true }, true);
+        const channels = (result.channels || [])
+          .filter(c => c.is_member)
+          .map(c => ({ id: c.id, name: c.name }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, channels }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // List Slack lists (files of type "list") in a channel
+    if (pathname === '/admin/lists' && req.method === 'GET') {
+      const channelId = url.searchParams.get('channel');
+      if (!channelId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Missing channel' })); return; }
+      try {
+        // Get channel tabs to find lists
+        const result = await slackApi(SLACK_USER_TOKEN, 'conversations.tabs', { channel: channelId }, true);
+        const lists = (result.tabs || [])
+          .filter(t => t.type === 'list')
+          .map(t => ({ id: t.data?.file_id, name: t.label || 'List' }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, lists }));
+      } catch (err) {
+        // Fallback: search for list files in the channel
+        try {
+          const result = await slackApi(SLACK_USER_TOKEN, 'files.list', { channel: channelId, types: 'list', count: 20 }, true);
+          const lists = (result.files || []).map(f => ({ id: f.id, name: f.title || f.name || 'List' }));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, lists }));
+        } catch (err2) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err2.message }));
+        }
+      }
+      return;
+    }
+
+    // List items in a Slack list
+    if (pathname === '/admin/items' && req.method === 'GET') {
+      const listId = url.searchParams.get('list');
+      if (!listId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Missing list' })); return; }
+      try {
+        const info = await slackApi(SLACK_USER_TOKEN, 'files.info', { file: listId }, true);
+        const schema = info.file?.list_metadata?.schema || [];
+        const nameCol = schema.find(c => c.name === 'Name' || c.name === 'Title' || c.type === 'text');
+
+        const items = (info.file?.list_metadata?.items || []).map(item => {
+          let name = item.id;
+          if (nameCol && item.cells) {
+            const cell = item.cells[nameCol.id];
+            if (cell) {
+              // Extract text from rich_text or plain value
+              const rt = cell.rich_text;
+              if (rt && rt[0]?.elements?.[0]?.elements?.[0]?.text) {
+                name = rt[0].elements[0].elements[0].text;
+              } else if (typeof cell.value === 'string') {
+                name = cell.value;
+              }
+            }
+          }
+          return { id: item.id, name };
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, items, listName: info.file?.title || 'List' }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // Generate admin upload token
+    if (pathname === '/admin/token' && req.method === 'GET') {
+      const ch = url.searchParams.get('channel');
+      const list = url.searchParams.get('list');
+      const item = url.searchParams.get('item');
+      const name = url.searchParams.get('name') || 'Admin Upload';
+      if (!ch || !list || !item) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing channel, list, or item' }));
+        return;
+      }
+      const token = generateUploadToken(ch, list, item, name);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, token }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
     return;
   }
 
