@@ -151,13 +151,13 @@ const tusServer = new TusServer({
     uploadSessions.set(upload.id, {
       token,
       payload,
-      originalName: upload.metadata?.filename || 'file',
-      contentType: upload.metadata?.filetype || 'application/octet-stream',
+      originalName: upload.metadata?.filename || upload.metadata?.name || 'file',
+      contentType: upload.metadata?.filetype || upload.metadata?.type || 'application/octet-stream',
       size: upload.size,
       createdAt: Date.now(),
       cdnUrl: null,
     });
-    console.log(`[TUS] Upload created: ${upload.id} "${upload.metadata?.filename}" (${formatBytes(upload.size || 0)}) for "${payload.name}"`);
+    console.log(`[TUS] Upload created: ${upload.id} "${upload.metadata?.filename || upload.metadata?.name}" (${formatBytes(upload.size || 0)}) for "${payload.name}"`);
     return res;
   },
   async onUploadFinish(req, res, upload) {

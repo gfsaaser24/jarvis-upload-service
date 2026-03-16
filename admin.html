@@ -208,10 +208,10 @@
       proudlyDisplayPoweredByUppy: false, showProgressDetails: true, theme: 'dark',
       note: 'Resumable uploads. Large files welcome.',
     });
+    uppy.setMeta({ token: currentToken });
     uppy.use(Uppy.Tus, {
       endpoint: '/tus/', chunkSize: 10 * 1024 * 1024,
       retryDelays: [0, 1000, 3000, 5000, 10000], removeFingerprintOnSuccess: true,
-      metadata: function(file) { return { filename: file.name, filetype: file.type || 'application/octet-stream', token: currentToken }; },
     });
     uppy.on('upload-success', function(file, response) {
       var tusId = (response.uploadURL || '').split('/').pop();
