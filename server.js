@@ -405,28 +405,31 @@ const server = http.createServer(async (req, res) => {
         // Get schema to find the Name column index
         const info = await slackApi(SLACK_USER_TOKEN, 'files.info', { file: listId }, true);
         const schema = info.file?.list_metadata?.schema || [];
-        // Prefer "Vehicle Year, Make, Model" column, fall back to "Name"
-        let nameColIdx = schema.findIndex(c => c.name && c.name.toLowerCase().includes('vehicle'));
-        if (nameColIdx < 0) nameColIdx = schema.findIndex(c => c.key === 'name' || c.name === 'Name' || c.name === 'Title');
-        const nameFieldKey = nameColIdx >= 0 ? String(nameColIdx) : '0';
+        // Find the "Vehicle Year, Make, Model" column ID, fall back to "Name"
+        let targetCol = schema.find(c => c.name && c.name.toLowerCase().includes('vehicle'));
+        if (!targetCol) targetCol = schema.find(c => c.key === 'name' || c.name === 'Name' || c.name === 'Title');
+        const targetColId = targetCol?.id;
 
         // Get items via slackLists.items.list
         const result = await slackApi(SLACK_USER_TOKEN, 'slackLists.items.list', { list_id: listId, limit: 100 }, true);
         const items = (result.items || []).map(item => {
           let name = item.id;
-          const field = item.fields?.[nameFieldKey];
-          if (field) {
-            const rt = field.rich_text;
-            if (rt?.[0]?.elements?.[0]?.elements?.[0]?.text) {
-              name = rt[0].elements[0].elements[0].text;
-            } else if (typeof field.value === 'string') {
-              name = field.value;
-            } else if (field.text) {
-              name = field.text;
+          // Fields are keyed by arbitrary index, match by column_id
+          for (const field of Object.values(item.fields || {})) {
+            if (field.column_id === targetColId) {
+              const rt = field.rich_text;
+              if (rt?.[0]?.elements?.[0]?.elements?.[0]?.text) {
+                name = rt[0].elements[0].elements[0].text;
+              } else if (typeof field.value === 'string' && field.value) {
+                name = field.value;
+              } else if (field.text) {
+                name = field.text;
+              }
+              break;
             }
           }
           return { id: item.id, name };
-        }).filter(item => item.name !== item.id); // Skip items with no name
+        }).filter(item => item.name !== item.id);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, items, listName: info.file?.title || 'List' }));
       } catch (err) {
