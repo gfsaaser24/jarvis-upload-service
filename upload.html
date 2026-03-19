@@ -2,9 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Upload Files</title>
-<link href="https://releases.transloadit.com/uppy/v4.12.1/uppy.min.css" rel="stylesheet">
 <style>
   :root {
     --bg: #1a1a2e;
@@ -15,7 +14,9 @@
     --accent: #4ade80;
     --accent-hover: #22c55e;
     --error: #f87171;
+    --warning: #fbbf24;
     --border: #27272a;
+    --progress-bg: #27272a;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -26,6 +27,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    -webkit-text-size-adjust: 100%;
   }
   .container {
     width: 100%;
@@ -36,31 +38,19 @@
     text-align: center;
     margin-bottom: 24px;
   }
-  .header h1 {
-    font-size: 1.5rem;
-    font-weight: 600;
-    margin-bottom: 4px;
-  }
-  .header .job-name {
-    color: var(--accent);
-    font-size: 1.1rem;
-    font-weight: 500;
-  }
-  .header .job-vehicle {
-    color: var(--text-muted);
-    font-size: 0.95rem;
-    margin-top: 4px;
-  }
+  .header h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 4px; }
+  .header .job-name { color: var(--accent); font-size: 1.1rem; font-weight: 500; }
+  .header .job-vehicle { color: var(--text-muted); font-size: 0.95rem; margin-top: 4px; }
+
   .status-msg {
     text-align: center;
     padding: 48px 16px;
     font-size: 1.1rem;
   }
   .status-msg.error { color: var(--error); }
-  .status-msg .spinner {
+  .spinner {
     display: inline-block;
-    width: 24px;
-    height: 24px;
+    width: 24px; height: 24px;
     border: 3px solid var(--border);
     border-top-color: var(--accent);
     border-radius: 50%;
@@ -70,11 +60,107 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  #uppy-dashboard { margin-bottom: 16px; }
+  .banner {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+    display: none;
+  }
+  .banner.visible { display: flex; align-items: center; gap: 10px; }
+  .banner .icon { font-size: 1.2rem; flex-shrink: 0; }
+  .banner .info { flex: 1; }
+  .banner .info .title { color: var(--warning); font-weight: 600; }
+  .banner .info .detail { color: var(--text-muted); margin-top: 2px; }
+
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 40px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .drop-zone:hover, .drop-zone.dragover {
+    border-color: var(--accent);
+    background: rgba(74, 222, 128, 0.05);
+  }
+  .drop-zone .dz-icon { font-size: 2.5rem; margin-bottom: 12px; }
+  .drop-zone .label { font-size: 1rem; color: var(--text); margin-bottom: 4px; }
+  .drop-zone .sublabel { font-size: 0.85rem; color: var(--text-muted); }
+  .drop-zone input[type="file"] { display: none; }
+
+  .file-list { margin-top: 16px; }
+  .file-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 8px;
+  }
+  .file-card .file-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .file-card .file-name {
+    font-size: 0.9rem;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    margin-right: 8px;
+  }
+  .file-card .file-size { font-size: 0.8rem; color: var(--text-muted); flex-shrink: 0; }
+  .file-card .file-status { font-size: 0.8rem; margin-top: 4px; }
+  .file-card .file-status.uploading { color: var(--accent); }
+  .file-card .file-status.complete { color: var(--accent); }
+  .file-card .file-status.error { color: var(--error); }
+  .file-card .file-status.queued { color: var(--text-muted); }
+  .file-card .file-status.paused { color: var(--warning); }
+
+  .progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--progress-bg);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .progress-bar .fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+    width: 0%;
+  }
+  .progress-bar .fill.error { background: var(--error); }
+
+  .overall-progress {
+    margin-top: 16px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: none;
+  }
+  .overall-progress.visible { display: block; }
+  .overall-progress .stats {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .overall-progress .eta { color: var(--warning); font-weight: 500; }
 
   .finish-section {
     text-align: center;
-    margin-top: 16px;
+    margin-top: 20px;
     display: none;
   }
   .finish-section.visible { display: block; }
@@ -82,23 +168,18 @@
     background: var(--accent);
     color: #000;
     border: none;
-    padding: 14px 32px;
-    font-size: 1rem;
+    padding: 16px 36px;
+    font-size: 1.05rem;
     font-weight: 600;
     border-radius: 8px;
     cursor: pointer;
     transition: background 0.15s;
+    -webkit-tap-highlight-color: transparent;
+    min-height: 52px;
   }
   .finish-btn:hover { background: var(--accent-hover); }
-  .finish-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .finish-status {
-    margin-top: 12px;
-    font-size: 0.9rem;
-    color: var(--text-muted);
-  }
+  .finish-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .finish-status { margin-top: 12px; font-size: 0.9rem; color: var(--text-muted); }
 
   .done-section {
     text-align: center;
@@ -106,28 +187,21 @@
     display: none;
   }
   .done-section.visible { display: block; }
-  .done-section .checkmark {
-    font-size: 3rem;
-    margin-bottom: 16px;
-  }
-  .done-section h2 {
-    font-size: 1.3rem;
-    margin-bottom: 8px;
-    color: var(--accent);
-  }
-  .done-section p {
-    color: var(--text-muted);
-  }
+  .done-section .checkmark { font-size: 3rem; margin-bottom: 16px; }
+  .done-section h2 { font-size: 1.3rem; margin-bottom: 8px; color: var(--accent); }
+  .done-section p { color: var(--text-muted); }
 
-  /* Uppy dark theme overrides */
-  .uppy-Dashboard-inner { background: var(--surface) !important; border-color: var(--border) !important; }
-  .uppy-Dashboard-AddFiles { background: var(--surface) !important; border-color: var(--border) !important; }
-  .uppy-Dashboard-dropFilesHereHint { color: var(--text-muted) !important; }
-  .uppy-DashboardContent-bar { background: var(--surface2) !important; border-color: var(--border) !important; }
-  .uppy-DashboardContent-title { color: var(--text) !important; }
-  .uppy-Dashboard-Item { background: var(--surface2) !important; }
-  .uppy-Dashboard-Item-name { color: var(--text) !important; }
-  .uppy-StatusBar { background: var(--surface2) !important; }
+  .retry-btn {
+    background: none;
+    border: 1px solid var(--error);
+    color: var(--error);
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    margin-left: 8px;
+  }
+  .retry-btn:hover { background: rgba(248, 113, 113, 0.1); }
 </style>
 </head>
 <body>
@@ -145,9 +219,41 @@
   <div class="status-msg error" id="error-state" style="display:none"></div>
 
   <div id="upload-section" style="display:none">
-    <div id="uppy-dashboard"></div>
+    <div class="banner" id="wake-banner">
+      <span class="icon">&#9889;</span>
+      <div class="info">
+        <div class="title">Keep this page open</div>
+        <div class="detail" id="wake-detail">Screen will stay on while uploading</div>
+      </div>
+    </div>
+
+    <div class="banner" id="resume-banner">
+      <span class="icon">&#8635;</span>
+      <div class="info">
+        <div class="title">Previous upload found</div>
+        <div class="detail">Resuming from where it left off</div>
+      </div>
+    </div>
+
+    <div class="drop-zone" id="drop-zone">
+      <div class="dz-icon">&#128206;</div>
+      <div class="label">Tap to select files</div>
+      <div class="sublabel">or drag and drop &mdash; videos, photos, any files</div>
+      <input type="file" id="file-input" multiple>
+    </div>
+
+    <div class="file-list" id="file-list"></div>
+
+    <div class="overall-progress" id="overall-progress">
+      <div class="stats">
+        <span id="progress-text">0 of 0 files</span>
+        <span class="eta" id="eta-text"></span>
+      </div>
+      <div class="progress-bar"><div class="fill" id="overall-fill"></div></div>
+    </div>
+
     <div class="finish-section" id="finish-section">
-      <button class="finish-btn" id="finish-btn" onclick="finishUpload()">Finish &amp; Save to Tracker</button>
+      <button class="finish-btn" id="finish-btn">Finish &amp; Save to Tracker</button>
       <div class="finish-status" id="finish-status"></div>
     </div>
   </div>
@@ -159,24 +265,60 @@
   </div>
 </div>
 
-<script src="https://releases.transloadit.com/uppy/v4.12.1/uppy.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tus-js-client@4.2.3/dist/tus.min.js"></script>
 <script>
 (function() {
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get('t');
+  'use strict';
 
-  const loadingEl = document.getElementById('loading-state');
-  const errorEl = document.getElementById('error-state');
-  const uploadEl = document.getElementById('upload-section');
-  const jobNameEl = document.getElementById('job-name');
-  const jobVehicleEl = document.getElementById('job-vehicle');
-  const finishSection = document.getElementById('finish-section');
-  const finishBtn = document.getElementById('finish-btn');
-  const finishStatus = document.getElementById('finish-status');
-  const doneSection = document.getElementById('done-section');
+  var token = new URLSearchParams(location.search).get('t');
+  var isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || window.innerWidth < 768;
+  var CHUNK_SIZE = 5 * 1024 * 1024;
+  var MAX_FILES = 50;
+  var MAX_CONCURRENT = isMobile ? 1 : 3;
+  var RETRY_DELAYS = [0, 1000, 3000, 5000, 10000, 15000, 30000];
 
-  const completedUploadIds = [];
-  let uppy = null;
+  var files = [];
+  var completedUploadIds = [];
+  var activeUploads = 0;
+  var wakeLock = null;
+  var totalBytes = 0;
+  var lastSpeedTime = 0;
+  var lastSpeedBytes = 0;
+  var speedSamples = [];
+
+  var loadingEl = document.getElementById('loading-state');
+  var errorEl = document.getElementById('error-state');
+  var uploadEl = document.getElementById('upload-section');
+  var jobNameEl = document.getElementById('job-name');
+  var jobVehicleEl = document.getElementById('job-vehicle');
+  var dropZone = document.getElementById('drop-zone');
+  var fileInput = document.getElementById('file-input');
+  var fileListEl = document.getElementById('file-list');
+  var overallEl = document.getElementById('overall-progress');
+  var progressText = document.getElementById('progress-text');
+  var etaText = document.getElementById('eta-text');
+  var overallFill = document.getElementById('overall-fill');
+  var finishSection = document.getElementById('finish-section');
+  var finishBtn = document.getElementById('finish-btn');
+  var finishStatus = document.getElementById('finish-status');
+  var doneSection = document.getElementById('done-section');
+  var wakeBanner = document.getElementById('wake-banner');
+  var wakeDetail = document.getElementById('wake-detail');
+  var resumeBanner = document.getElementById('resume-banner');
+
+  function formatBytes(b) {
+    if (b === 0) return '0 B';
+    var k = 1024, s = ['B','KB','MB','GB'];
+    var i = Math.floor(Math.log(b) / Math.log(k));
+    return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + s[i];
+  }
+
+  function formatTime(sec) {
+    if (!sec || sec <= 0 || !isFinite(sec)) return '';
+    if (sec < 60) return Math.round(sec) + 's';
+    if (sec < 3600) return Math.round(sec / 60) + 'm ' + Math.round(sec % 60) + 's';
+    return Math.floor(sec / 3600) + 'h ' + Math.round((sec % 3600) / 60) + 'm';
+  }
 
   function showError(msg) {
     loadingEl.style.display = 'none';
@@ -184,82 +326,312 @@
     errorEl.style.display = 'block';
   }
 
-  if (!token) {
-    showError('No upload token provided. Use the link from Slack.');
-    return;
+  // ─── Wake Lock ────────────────────────────────────────────────────
+  function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    navigator.wakeLock.request('screen').then(function(wl) {
+      wakeLock = wl;
+      wakeLock.addEventListener('release', function() { wakeLock = null; });
+      wakeBanner.classList.add('visible');
+    }).catch(function() {});
   }
 
-  // Verify token
+  function releaseWakeLock() {
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+    wakeBanner.classList.remove('visible');
+  }
+
+  // ─── Visibility change — pause/resume ─────────────────────────────
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') {
+      files.forEach(function(f) {
+        if (f.status === 'uploading' && f.tusUpload) {
+          f.tusUpload.abort();
+          f.status = 'paused';
+          updateFileCard(f);
+        }
+      });
+    } else {
+      files.forEach(function(f) {
+        if (f.status === 'paused' && f.tusUpload) {
+          f.status = 'uploading';
+          f.tusUpload.start();
+          updateFileCard(f);
+        }
+      });
+      if (activeUploads > 0 && !wakeLock) requestWakeLock();
+    }
+  });
+
+  // ─── Warn before leaving ──────────────────────────────────────────
+  window.addEventListener('beforeunload', function(e) {
+    if (activeUploads > 0) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  // ─── Token verification ───────────────────────────────────────────
+  if (!token) { showError('No upload token provided. Use the link from Slack.'); return; }
+
   fetch('/upload/verify?t=' + encodeURIComponent(token))
-    .then(r => r.json())
-    .then(data => {
-      if (!data.ok) {
-        showError(data.error || 'This upload link is invalid or expired.');
-        return;
-      }
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.ok) { showError(data.error || 'This upload link is invalid or expired.'); return; }
       loadingEl.style.display = 'none';
       uploadEl.style.display = 'block';
       jobNameEl.textContent = data.name;
       if (data.vehicle) jobVehicleEl.textContent = data.vehicle;
-      initUppy();
     })
-    .catch(() => showError('Could not verify upload link. Please try again.'));
+    .catch(function() { showError('Could not verify upload link. Please try again.'); });
 
-  function initUppy() {
-    uppy = new Uppy.Uppy({
-      restrictions: {
-        maxNumberOfFiles: 50,
-      },
-      autoProceed: true,
+  // ─── File selection ───────────────────────────────────────────────
+  dropZone.addEventListener('click', function() { fileInput.click(); });
+  fileInput.addEventListener('change', function() {
+    if (fileInput.files.length > 0) addFiles(fileInput.files);
+    fileInput.value = '';
+  });
+
+  dropZone.addEventListener('dragenter', function(e) { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', function() { dropZone.classList.remove('dragover'); });
+  dropZone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files);
+  });
+
+  function addFiles(fileList) {
+    var newFiles = Array.from(fileList);
+    if (files.length + newFiles.length > MAX_FILES) {
+      alert('Maximum ' + MAX_FILES + ' files allowed.');
+      return;
+    }
+    newFiles.forEach(function(file) {
+      var entry = {
+        id: Math.random().toString(36).substr(2, 9),
+        file: file,
+        status: 'queued',
+        progress: 0,
+        bytesUploaded: 0,
+        tusUpload: null,
+        tusId: null,
+        error: null,
+      };
+      files.push(entry);
+      totalBytes += file.size;
+      createFileCard(entry);
     });
+    overallEl.classList.add('visible');
+    updateOverallProgress();
+    requestWakeLock();
+    processQueue();
+  }
 
-    uppy.use(Uppy.Dashboard, {
-      target: '#uppy-dashboard',
-      inline: true,
-      height: 420,
-      proudlyDisplayPoweredByUppy: false,
-      showProgressDetails: false,
-      theme: 'dark',
-      note: 'Drag and drop files or click to browse. Resumable uploads — large files welcome.',
-    });
+  // ─── File card UI (safe DOM construction) ─────────────────────────
+  function createFileCard(entry) {
+    var card = document.createElement('div');
+    card.className = 'file-card';
+    card.id = 'card-' + entry.id;
 
-    uppy.setMeta({ token: token });
+    var header = document.createElement('div');
+    header.className = 'file-header';
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'file-name';
+    nameSpan.textContent = entry.file.name;
+    var sizeSpan = document.createElement('span');
+    sizeSpan.className = 'file-size';
+    sizeSpan.textContent = formatBytes(entry.file.size);
+    header.appendChild(nameSpan);
+    header.appendChild(sizeSpan);
 
-    uppy.use(Uppy.Tus, {
-      endpoint: '/tus/',
-      chunkSize: 10 * 1024 * 1024, // 10MB chunks
-      retryDelays: [0, 1000, 3000, 5000, 10000],
-      removeFingerprintOnSuccess: true,
-    });
+    var progressBar = document.createElement('div');
+    progressBar.className = 'progress-bar';
+    var fill = document.createElement('div');
+    fill.className = 'fill';
+    fill.id = 'fill-' + entry.id;
+    progressBar.appendChild(fill);
 
-    uppy.on('upload-success', (file, response) => {
-      // Extract TUS upload ID from the upload URL
-      const uploadUrl = response.uploadURL || '';
-      const tusId = uploadUrl.split('/').pop();
-      if (tusId) {
-        completedUploadIds.push(tusId);
+    var status = document.createElement('div');
+    status.className = 'file-status queued';
+    status.id = 'status-' + entry.id;
+    status.textContent = 'Queued';
+
+    card.appendChild(header);
+    card.appendChild(progressBar);
+    card.appendChild(status);
+    fileListEl.appendChild(card);
+  }
+
+  function updateFileCard(entry) {
+    var fill = document.getElementById('fill-' + entry.id);
+    var status = document.getElementById('status-' + entry.id);
+    if (!fill || !status) return;
+
+    fill.style.width = Math.round(entry.progress * 100) + '%';
+    fill.className = 'fill' + (entry.status === 'error' ? ' error' : '');
+
+    // Clear previous status content
+    while (status.firstChild) status.removeChild(status.firstChild);
+    status.className = 'file-status ' + entry.status;
+
+    if (entry.status === 'queued') {
+      status.textContent = 'Queued';
+    } else if (entry.status === 'uploading') {
+      status.textContent = 'Uploading... ' + Math.round(entry.progress * 100) + '%';
+    } else if (entry.status === 'paused') {
+      status.textContent = 'Paused \u2014 switch back to resume';
+    } else if (entry.status === 'complete') {
+      status.textContent = 'Complete';
+    } else if (entry.status === 'error') {
+      status.textContent = entry.error || 'Failed';
+      var retryBtn = document.createElement('button');
+      retryBtn.className = 'retry-btn';
+      retryBtn.textContent = 'Retry';
+      retryBtn.addEventListener('click', function() { retryUpload(entry); });
+      status.appendChild(retryBtn);
+    }
+  }
+
+  // ─── Upload queue ─────────────────────────────────────────────────
+  function processQueue() {
+    while (activeUploads < MAX_CONCURRENT) {
+      var next = null;
+      for (var i = 0; i < files.length; i++) {
+        if (files[i].status === 'queued') { next = files[i]; break; }
       }
+      if (!next) break;
+      startUpload(next);
+    }
+    checkAllComplete();
+  }
+
+  // ─── Core TUS upload ──────────────────────────────────────────────
+  function startUpload(entry) {
+    entry.status = 'uploading';
+    activeUploads++;
+    updateFileCard(entry);
+
+    var upload = new tus.Upload(entry.file, {
+      endpoint: '/tus/',
+      chunkSize: CHUNK_SIZE,
+      retryDelays: RETRY_DELAYS,
+      removeFingerprintOnSuccess: true,
+      metadata: {
+        token: token,
+        filename: entry.file.name,
+        filetype: entry.file.type || 'application/octet-stream',
+      },
+      onError: function(err) {
+        entry.status = 'error';
+        entry.error = err.message || 'Upload failed';
+        activeUploads--;
+        updateFileCard(entry);
+        processQueue();
+      },
+      onProgress: function(bytesUploaded, bytesTotal) {
+        entry.bytesUploaded = bytesUploaded;
+        entry.progress = bytesTotal > 0 ? bytesUploaded / bytesTotal : 0;
+        updateFileCard(entry);
+        updateOverallProgress();
+      },
+      onSuccess: function() {
+        var uploadUrl = upload.url || '';
+        var tusId = uploadUrl.split('/').pop();
+        if (tusId) {
+          entry.tusId = tusId;
+          completedUploadIds.push(tusId);
+        }
+        entry.status = 'complete';
+        entry.progress = 1;
+        entry.bytesUploaded = entry.file.size;
+        activeUploads--;
+        updateFileCard(entry);
+        updateOverallProgress();
+        processQueue();
+      },
     });
 
-    uppy.on('complete', (result) => {
-      if (completedUploadIds.length > 0) {
-        finishSection.classList.add('visible');
+    entry.tusUpload = upload;
+
+    // Resume previous upload if available (cross-session resume)
+    upload.findPreviousUploads().then(function(prev) {
+      if (prev.length > 0) {
+        resumeBanner.classList.add('visible');
+        setTimeout(function() { resumeBanner.classList.remove('visible'); }, 5000);
+        upload.resumeUpload(prev[0]);
+      } else {
+        upload.start();
       }
     });
   }
 
-  window.finishUpload = async function() {
+  function retryUpload(entry) {
+    entry.status = 'queued';
+    entry.progress = 0;
+    entry.bytesUploaded = 0;
+    entry.error = null;
+    entry.tusUpload = null;
+    entry.tusId = null;
+    updateFileCard(entry);
+    processQueue();
+  }
+
+  // ─── Progress tracking ────────────────────────────────────────────
+  function updateOverallProgress() {
+    var completed = 0;
+    var currentUploaded = 0;
+    files.forEach(function(f) {
+      if (f.status === 'complete') completed++;
+      currentUploaded += (f.bytesUploaded || 0);
+    });
+
+    progressText.textContent = completed + ' of ' + files.length + ' files \u2014 ' +
+      formatBytes(currentUploaded) + ' / ' + formatBytes(totalBytes);
+
+    var pct = totalBytes > 0 ? (currentUploaded / totalBytes) * 100 : 0;
+    overallFill.style.width = Math.round(pct) + '%';
+
+    var now = Date.now();
+    if (lastSpeedTime && now - lastSpeedTime >= 2000) {
+      var elapsed = (now - lastSpeedTime) / 1000;
+      var delta = currentUploaded - lastSpeedBytes;
+      if (delta > 0) {
+        var speed = delta / elapsed;
+        speedSamples.push(speed);
+        if (speedSamples.length > 5) speedSamples.shift();
+        var avg = speedSamples.reduce(function(a, b) { return a + b; }, 0) / speedSamples.length;
+        var remaining = totalBytes - currentUploaded;
+        var eta = avg > 0 ? remaining / avg : 0;
+        etaText.textContent = formatBytes(avg) + '/s \u2014 ' + formatTime(eta) + ' left';
+        wakeDetail.textContent = formatTime(eta) + ' remaining \u2014 keep this page open';
+      }
+      lastSpeedTime = now;
+      lastSpeedBytes = currentUploaded;
+    }
+    if (!lastSpeedTime) { lastSpeedTime = now; lastSpeedBytes = currentUploaded; }
+  }
+
+  // ─── Completion ───────────────────────────────────────────────────
+  function checkAllComplete() {
+    if (files.length === 0) return;
+    var allDone = files.every(function(f) { return f.status === 'complete' || f.status === 'error'; });
+    if (allDone && completedUploadIds.length > 0) {
+      finishSection.classList.add('visible');
+      releaseWakeLock();
+    }
+  }
+
+  // ─── Finish & Save ────────────────────────────────────────────────
+  finishBtn.addEventListener('click', function() {
     if (completedUploadIds.length === 0) return;
     finishBtn.disabled = true;
     finishStatus.textContent = 'Saving to tracker...';
 
-    try {
-      const resp = await fetch('/upload/complete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: token, uploadIds: completedUploadIds }),
-      });
-      const data = await resp.json();
+    fetch('/upload/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, uploadIds: completedUploadIds }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
       if (data.ok) {
         uploadEl.style.display = 'none';
         doneSection.classList.add('visible');
@@ -267,11 +639,13 @@
         finishStatus.textContent = 'Error: ' + (data.error || 'Unknown error');
         finishBtn.disabled = false;
       }
-    } catch (e) {
+    })
+    .catch(function() {
       finishStatus.textContent = 'Network error. Please try again.';
       finishBtn.disabled = false;
-    }
-  };
+    });
+  });
+
 })();
 </script>
 </body>
