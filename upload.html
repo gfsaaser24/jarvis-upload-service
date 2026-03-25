@@ -123,6 +123,7 @@
   .file-card .file-status.error { color: var(--error); }
   .file-card .file-status.queued { color: var(--text-muted); }
   .file-card .file-status.paused { color: var(--warning); }
+  .file-card .file-status.stalled { color: var(--warning); }
 
   .progress-bar {
     width: 100%;
@@ -345,7 +346,8 @@
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'hidden') {
       files.forEach(function(f) {
-        if (f.status === 'uploading' && f.tusUpload) {
+        if ((f.status === 'uploading' || f.status === 'stalled') && f.tusUpload) {
+          clearStallTimer(f);
           f.tusUpload.abort();
           f.status = 'paused';
           updateFileCard(f);
@@ -356,6 +358,7 @@
         if (f.status === 'paused' && f.tusUpload) {
           f.status = 'uploading';
           f.tusUpload.start();
+          resetStallTimer(f);
           updateFileCard(f);
         }
       });
@@ -478,6 +481,8 @@
       status.textContent = 'Uploading... ' + Math.round(entry.progress * 100) + '%';
     } else if (entry.status === 'paused') {
       status.textContent = 'Paused \u2014 switch back to resume';
+    } else if (entry.status === 'stalled') {
+      status.textContent = 'Connection lost \u2014 reconnecting...';
     } else if (entry.status === 'complete') {
       status.textContent = 'Complete';
     } else if (entry.status === 'error') {
@@ -503,9 +508,54 @@
     checkAllComplete();
   }
 
+  // ─── Stall detection ───────────────────────────────────────────────
+  var STALL_TIMEOUT = 30000; // 30 seconds with no progress = stalled
+  var MAX_STALL_RETRIES = 5;
+
+  function clearStallTimer(entry) {
+    if (entry.stallTimer) { clearTimeout(entry.stallTimer); entry.stallTimer = null; }
+  }
+
+  function resetStallTimer(entry) {
+    clearStallTimer(entry);
+    entry.stallTimer = setTimeout(function() { handleStall(entry); }, STALL_TIMEOUT);
+  }
+
+  function handleStall(entry) {
+    if (entry.status !== 'uploading') return;
+    entry.stallCount = (entry.stallCount || 0) + 1;
+    if (entry.stallCount > MAX_STALL_RETRIES) {
+      // Give up after too many stalls
+      clearStallTimer(entry);
+      entry.status = 'error';
+      entry.error = 'Upload stalled after ' + MAX_STALL_RETRIES + ' retries';
+      activeUploads--;
+      updateFileCard(entry);
+      processQueue();
+      return;
+    }
+    // Show stalled status and auto-retry
+    entry.status = 'stalled';
+    updateFileCard(entry);
+    if (entry.tusUpload) {
+      entry.tusUpload.abort();
+    }
+    // Wait a moment then restart — TUS will resume via HEAD from last offset
+    setTimeout(function() {
+      if (entry.status !== 'stalled') return; // user may have manually retried
+      entry.status = 'uploading';
+      updateFileCard(entry);
+      if (entry.tusUpload) {
+        entry.tusUpload.start();
+        resetStallTimer(entry);
+      }
+    }, 2000);
+  }
+
   // ─── Core TUS upload ──────────────────────────────────────────────
   function startUpload(entry) {
     entry.status = 'uploading';
+    entry.stallCount = 0;
     activeUploads++;
     updateFileCard(entry);
 
@@ -520,6 +570,7 @@
         filetype: entry.file.type || 'application/octet-stream',
       },
       onError: function(err) {
+        clearStallTimer(entry);
         entry.status = 'error';
         entry.error = err.message || 'Upload failed';
         activeUploads--;
@@ -527,12 +578,15 @@
         processQueue();
       },
       onProgress: function(bytesUploaded, bytesTotal) {
+        entry.stallCount = 0; // reset stall count on any progress
+        resetStallTimer(entry);
         entry.bytesUploaded = bytesUploaded;
         entry.progress = bytesTotal > 0 ? bytesUploaded / bytesTotal : 0;
         updateFileCard(entry);
         updateOverallProgress();
       },
       onSuccess: function() {
+        clearStallTimer(entry);
         var uploadUrl = upload.url || '';
         var tusId = uploadUrl.split('/').pop();
         if (tusId) {
@@ -550,6 +604,7 @@
     });
 
     entry.tusUpload = upload;
+    resetStallTimer(entry); // start stall detection immediately
 
     // Resume previous upload if available (cross-session resume)
     upload.findPreviousUploads().then(function(prev) {
@@ -564,7 +619,9 @@
   }
 
   function retryUpload(entry) {
+    clearStallTimer(entry);
     entry.status = 'queued';
+    entry.stallCount = 0;
     entry.progress = 0;
     entry.bytesUploaded = 0;
     entry.error = null;
