@@ -18,9 +18,11 @@ const JARVIS_CALLBACK_TOKEN = process.env.JARVIS_CALLBACK_TOKEN;
 const ADMIN_KEY = process.env.ADMIN_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_USER_TOKEN = process.env.SLACK_USER_TOKEN;
+const CACHE_DIR = process.env.CACHE_DIR || '/data';
 
-// Ensure upload dir exists
+// Ensure dirs exist
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 // ─── Token validation (same HMAC logic as Jarvis dashboard) ────────────
 function validateUploadToken(token) {
@@ -121,6 +123,98 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+// ─── Media Links Cache (persistent, debounced Slack flush) ────────────
+// Persists CDN URLs per list item to disk. After each new URL, debounces
+// a Slack List cell overwrite so rapid uploads batch into one API call.
+const MEDIA_CACHE_FILE = path.join(CACHE_DIR, 'media-links-cache.json');
+const FLUSH_DELAY_MS = 5000; // 5s of silence before flushing to Slack
+const columnIdCache = new Map(); // listId → columnId (in-memory, looked up once per list)
+const flushTimers = new Map();   // cacheKey → timer
+
+function loadMediaCache() {
+  try {
+    if (fs.existsSync(MEDIA_CACHE_FILE)) return JSON.parse(fs.readFileSync(MEDIA_CACHE_FILE, 'utf8'));
+  } catch (err) { console.log('[CACHE] Error loading cache:', err.message); }
+  return {};
+}
+
+function saveMediaCache(cache) {
+  try { fs.writeFileSync(MEDIA_CACHE_FILE, JSON.stringify(cache, null, 2)); }
+  catch (err) { console.log('[CACHE] Error saving cache:', err.message); }
+}
+
+function addUrlToCache(listId, itemId, url) {
+  const cache = loadMediaCache();
+  const key = listId + ':' + itemId;
+  if (!cache[key]) cache[key] = { urls: [], lastFlushed: 0 };
+  if (!cache[key].urls.includes(url)) {
+    cache[key].urls.push(url);
+    saveMediaCache(cache);
+    console.log(`[CACHE] Added URL to ${key} (${cache[key].urls.length} total)`);
+  }
+  return { key, count: cache[key].urls.length };
+}
+
+async function getMediaLinksColumnId(listId) {
+  if (columnIdCache.has(listId)) return columnIdCache.get(listId);
+  if (!SLACK_USER_TOKEN) return null;
+  try {
+    const info = await slackApi(SLACK_USER_TOKEN, 'files.info', { file: listId }, true);
+    if (!info.ok) { console.log('[CACHE] files.info failed:', info.error); return null; }
+    const schema = info.file?.list_metadata?.schema || [];
+    const col = schema.find(c => c.name === 'Media Links');
+    if (col) {
+      columnIdCache.set(listId, col.id);
+      console.log(`[CACHE] Media Links column for ${listId}: ${col.id}`);
+      return col.id;
+    }
+    console.log(`[CACHE] "Media Links" column not found in ${schema.length} columns`);
+  } catch (err) { console.log('[CACHE] Column lookup error:', err.message); }
+  return null;
+}
+
+async function flushMediaLinks(listId, itemId) {
+  const key = listId + ':' + itemId;
+  const cache = loadMediaCache();
+  const entry = cache[key];
+  if (!entry || entry.urls.length === 0) return;
+
+  const colId = await getMediaLinksColumnId(listId);
+  if (!colId) { console.log(`[CACHE] Cannot flush ${key} — no column ID`); return; }
+
+  const textLines = entry.urls.join('\n\n');
+  const richText = [{ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: textLines }] }] }];
+
+  try {
+    const result = await slackApi(SLACK_USER_TOKEN, 'slackLists.items.update', {
+      list_id: listId,
+      cells: [{ row_id: itemId, column_id: colId, rich_text: richText }],
+    }, true);
+
+    if (result.ok) {
+      entry.lastFlushed = Date.now();
+      saveMediaCache(cache);
+      console.log(`[CACHE] Flushed ${entry.urls.length} URLs to Slack for ${key}`);
+    } else {
+      console.log(`[CACHE] Slack update failed for ${key}: ${result.error}`);
+    }
+  } catch (err) {
+    console.log(`[CACHE] Flush error for ${key}:`, err.message);
+  }
+}
+
+function scheduleFlush(listId, itemId) {
+  const key = listId + ':' + itemId;
+  // Clear existing timer — resets the debounce
+  if (flushTimers.has(key)) clearTimeout(flushTimers.get(key));
+  // Set new timer
+  const timer = setTimeout(() => {
+    flushTimers.delete(key);
+    flushMediaLinks(listId, itemId);
+  }, FLUSH_DELAY_MS);
+  flushTimers.set(key, timer);
+}
+
 // ─── In-memory upload session tracking ─────────────────────────────────
 // Maps TUS upload IDs to { token, payload, originalName, contentType, cdnUrl }
 const uploadSessions = new Map();
@@ -209,6 +303,12 @@ const tusServer = new TusServer({
       session.cdnUrl = cdnUrl;
       session.bunnyName = safeName;
       console.log(`[TUS] Bunny push complete for "${session.originalName}" → ${cdnUrl}`);
+
+      // Cache URL and schedule debounced Slack List update
+      if (session.payload.list && session.payload.item) {
+        addUrlToCache(session.payload.list, session.payload.item, cdnUrl);
+        scheduleFlush(session.payload.list, session.payload.item);
+      }
 
       // Clean up local file
       try { fs.unlinkSync(localPath); } catch {}

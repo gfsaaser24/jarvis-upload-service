@@ -7,7 +7,9 @@ RUN npm install --production
 
 COPY server.js upload.html admin.html ./
 
-RUN mkdir -p /tmp/uploads && apk add --no-cache curl
+RUN mkdir -p /tmp/uploads /data && apk add --no-cache curl
+
+VOLUME /data
 
 ENV PORT=3000
 EXPOSE 3000
