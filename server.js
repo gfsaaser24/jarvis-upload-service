@@ -44,7 +44,7 @@ function validateUploadToken(token) {
 
 // ─── Admin token generation ────────────────────────────────────────────
 function generateUploadToken(channelId, listId, itemId, name) {
-  const payload = { ch: channelId, list: listId, item: itemId, name, ts: Date.now(), exp: Date.now() + 48 * 60 * 60 * 1000 };
+  const payload = { ch: channelId, list: listId, item: itemId, name, ts: Date.now(), exp: Date.now() + 7 * 24 * 60 * 60 * 1000 };
   const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const sig = crypto.createHmac('sha256', UPLOAD_SECRET).update(data).digest('hex');
   return data + '.' + sig;
