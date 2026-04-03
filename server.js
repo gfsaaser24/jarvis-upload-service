@@ -78,6 +78,9 @@ async function slackApi(token, method, body, useForm) {
 function uploadToBunny(filePath, remotePath, contentType) {
   return new Promise((resolve, reject) => {
     const stat = fs.statSync(filePath);
+    if (stat.size === 0) {
+      return reject(new Error('Refusing to upload 0-byte file to Bunny CDN'));
+    }
     const opts = {
       hostname: BUNNY_STORAGE_HOSTNAME,
       path: '/' + BUNNY_STORAGE_ZONE + '/' + remotePath,
@@ -171,14 +174,37 @@ const tusServer = new TusServer({
       console.log(`[TUS] Upload finished but no session: ${upload.id}`);
       return res;
     }
-    console.log(`[TUS] Upload finished: ${upload.id} "${session.originalName}" — pushing to Bunny...`);
+
+    const localPath = path.join(UPLOAD_DIR, upload.id);
+    let actualSize = 0;
+    try { actualSize = fs.statSync(localPath).size; } catch {}
+    const declaredSize = upload.size || session.size || 0;
+
+    // Reject 0-byte uploads — file data never arrived
+    if (actualSize === 0) {
+      console.log(`[TUS] REJECTED: "${session.originalName}" is 0 bytes on disk (declared ${formatBytes(declaredSize)}). Client sent no data.`);
+      session.bunnyError = `File is 0 bytes — upload data was not received (declared ${formatBytes(declaredSize)})`;
+      try { fs.unlinkSync(localPath); } catch {}
+      try { fs.unlinkSync(localPath + '.json'); } catch {}
+      return res;
+    }
+
+    // Warn on size mismatch (partial upload)
+    if (declaredSize > 0 && actualSize !== declaredSize) {
+      console.log(`[TUS] REJECTED: "${session.originalName}" size mismatch — declared ${formatBytes(declaredSize)}, got ${formatBytes(actualSize)}`);
+      session.bunnyError = `Size mismatch: expected ${formatBytes(declaredSize)}, received ${formatBytes(actualSize)}`;
+      try { fs.unlinkSync(localPath); } catch {}
+      try { fs.unlinkSync(localPath + '.json'); } catch {}
+      return res;
+    }
+
+    console.log(`[TUS] Upload finished: ${upload.id} "${session.originalName}" (${formatBytes(actualSize)}) — pushing to Bunny...`);
 
     // Push to Bunny immediately (server-to-server, fast)
     try {
       const safeName = crypto.randomBytes(2).toString('hex') + '_' +
         session.originalName.replace(/[^a-zA-Z0-9._-]/g, '_').substring(0, 200);
       const remotePath = session.payload.ch + '/' + session.payload.item + '/' + safeName;
-      const localPath = path.join(UPLOAD_DIR, upload.id);
       const cdnUrl = await uploadToBunny(localPath, remotePath, session.contentType);
       session.cdnUrl = cdnUrl;
       session.bunnyName = safeName;

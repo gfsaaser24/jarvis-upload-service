@@ -411,12 +411,12 @@
       var entry = {
         id: Math.random().toString(36).substr(2, 9),
         file: file,
-        status: 'queued',
+        status: file.size === 0 ? 'error' : 'queued',
         progress: 0,
         bytesUploaded: 0,
         tusUpload: null,
         tusId: null,
-        error: null,
+        error: file.size === 0 ? 'File is empty (0 bytes) — cannot upload' : null,
       };
       files.push(entry);
       totalBytes += file.size;
@@ -689,11 +689,39 @@
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      if (data.ok) {
+      if (data.ok && (!data.errors || data.errors.length === 0)) {
+        // All files succeeded — clean finish
         uploadEl.style.display = 'none';
         doneSection.classList.add('visible');
+      } else if (data.ok && data.errors && data.errors.length > 0) {
+        // Partial success — some files failed
+        var msg = data.fileCount + ' file' + (data.fileCount !== 1 ? 's' : '') + ' saved, but ' +
+          data.errors.length + ' failed:\n';
+        data.errors.forEach(function(e) { msg += '\n\u2022 ' + e; });
+        finishStatus.textContent = msg;
+        finishStatus.style.color = 'var(--warning)';
+        finishStatus.style.whiteSpace = 'pre-wrap';
+        finishStatus.style.textAlign = 'left';
+        finishBtn.textContent = 'Close';
+        finishBtn.disabled = false;
+        finishBtn.onclick = function() {
+          uploadEl.style.display = 'none';
+          doneSection.querySelector('h2').textContent = 'Partially Complete';
+          doneSection.querySelector('h2').style.color = 'var(--warning)';
+          doneSection.querySelector('p').textContent = data.fileCount + ' files saved. ' + data.errors.length + ' failed — re-upload those files.';
+          doneSection.classList.add('visible');
+        };
       } else {
-        finishStatus.textContent = 'Error: ' + (data.error || 'Unknown error');
+        // Total failure
+        var errMsg = data.error || 'Unknown error';
+        if (data.details && data.details.length > 0) {
+          errMsg += ':\n';
+          data.details.forEach(function(d) { errMsg += '\n\u2022 ' + d; });
+        }
+        finishStatus.textContent = errMsg;
+        finishStatus.style.color = 'var(--error)';
+        finishStatus.style.whiteSpace = 'pre-wrap';
+        finishStatus.style.textAlign = 'left';
         finishBtn.disabled = false;
       }
     })
