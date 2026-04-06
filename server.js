@@ -143,12 +143,14 @@ function saveMediaCache(cache) {
   catch (err) { console.log('[CACHE] Error saving cache:', err.message); }
 }
 
-function addUrlToCache(listId, itemId, url) {
+function addUrlToCache(listId, itemId, url, token) {
   const cache = loadMediaCache();
   const key = listId + ':' + itemId;
   if (!cache[key]) cache[key] = { urls: [], lastFlushed: 0 };
   if (!cache[key].urls.includes(url)) {
     cache[key].urls.push(url);
+    // Store token for Jarvis callback (persists across container restarts)
+    if (token && !cache[key].token) cache[key].token = token;
     saveMediaCache(cache);
     console.log(`[CACHE] Added URL to ${key} (${cache[key].urls.length} total)`);
   }
@@ -200,6 +202,50 @@ async function flushMediaLinks(listId, itemId) {
     }
   } catch (err) {
     console.log(`[CACHE] Flush error for ${key}:`, err.message);
+  }
+
+  // Forward to Jarvis dashboard for Queue task creation (once per item)
+  if (!entry.callbackSent && JARVIS_CALLBACK_URL) {
+    try {
+      // Find the token from any active session for this item
+      let token = null;
+      for (const [, session] of uploadSessions) {
+        if (session.payload?.list === listId && session.payload?.item === itemId && session.token) {
+          token = session.token;
+          break;
+        }
+      }
+      // Also check completed sessions stored in cache
+      if (!token) token = entry.token;
+
+      if (token) {
+        const files = entry.urls.map(url => {
+          const name = url.split('/').pop() || 'file';
+          return { name, url, size: 0 };
+        });
+        const cbUrl = new URL('/upload/complete', JARVIS_CALLBACK_URL);
+        const cbRes = await fetch(cbUrl.toString(), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(JARVIS_CALLBACK_TOKEN ? { 'Authorization': 'Bearer ' + JARVIS_CALLBACK_TOKEN } : {}),
+          },
+          body: JSON.stringify({ token, files }),
+        });
+        const cbData = await cbRes.json();
+        if (cbData.ok) {
+          entry.callbackSent = true;
+          saveMediaCache(cache);
+          console.log(`[CACHE] Jarvis callback sent for ${key} — ${files.length} files → Queue`);
+        } else {
+          console.log(`[CACHE] Jarvis callback failed for ${key}: ${cbData.error || 'unknown'}`);
+        }
+      } else {
+        console.log(`[CACHE] No token available for ${key} — skipping Jarvis callback`);
+      }
+    } catch (err) {
+      console.log(`[CACHE] Jarvis callback error for ${key}:`, err.message);
+    }
   }
 }
 
@@ -304,9 +350,9 @@ const tusServer = new TusServer({
       session.bunnyName = safeName;
       console.log(`[TUS] Bunny push complete for "${session.originalName}" → ${cdnUrl}`);
 
-      // Cache URL and schedule debounced Slack List update
+      // Cache URL and schedule debounced Slack List update + Queue task
       if (session.payload.list && session.payload.item) {
-        addUrlToCache(session.payload.list, session.payload.item, cdnUrl);
+        addUrlToCache(session.payload.list, session.payload.item, cdnUrl, session.token);
         scheduleFlush(session.payload.list, session.payload.item);
       }
 
