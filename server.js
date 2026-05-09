@@ -473,9 +473,29 @@ const server = http.createServer(async (req, res) => {
 
         console.log(`[COMPLETE] ${files.length} files for "${payload.name}" — forwarding to Jarvis...`);
 
-        // Forward to Jarvis dashboard's /upload/complete
+        // Dedupe with the cache-flush path. Both this manual handler and
+        // flushMediaLinks() POST to Jarvis /upload/complete; without a shared
+        // flag they race and produce two Queue tasks + two Slack confirmations.
+        // Use the same media-links-cache callbackSent gate.
+        const cacheKey = payload.list + ':' + payload.item;
+        const cache = loadMediaCache();
+        if (!cache[cacheKey]) cache[cacheKey] = { urls: [], lastFlushed: 0 };
+        const cacheEntry = cache[cacheKey];
+
+        // Cancel any pending debounced flush — we're sending now.
+        if (flushTimers.has(cacheKey)) {
+          clearTimeout(flushTimers.get(cacheKey));
+          flushTimers.delete(cacheKey);
+          console.log(`[COMPLETE] Cleared pending debounce for ${cacheKey}`);
+        }
+
         let jarvisOk = false;
-        if (JARVIS_CALLBACK_URL) {
+        let alreadyForwarded = false;
+        if (cacheEntry.callbackSent) {
+          alreadyForwarded = true;
+          jarvisOk = true;
+          console.log(`[COMPLETE] Jarvis callback already sent for ${cacheKey} — skipping (dedup)`);
+        } else if (JARVIS_CALLBACK_URL) {
           try {
             const callbackBody = JSON.stringify({ token, files });
             const cbUrl = new URL('/upload/complete', JARVIS_CALLBACK_URL);
@@ -489,7 +509,13 @@ const server = http.createServer(async (req, res) => {
             });
             const cbData = await cbRes.json();
             jarvisOk = cbData.ok;
-            console.log(`[COMPLETE] Jarvis callback: ok=${cbData.ok}` + (cbData.error ? ` error=${cbData.error}` : ''));
+            if (cbData.ok) {
+              cacheEntry.callbackSent = true;
+              saveMediaCache(cache);
+              console.log(`[COMPLETE] Jarvis callback: ok=true — marked callbackSent for ${cacheKey}`);
+            } else {
+              console.log(`[COMPLETE] Jarvis callback: ok=false` + (cbData.error ? ` error=${cbData.error}` : ''));
+            }
           } catch (err) {
             console.log(`[COMPLETE] Jarvis callback error:`, err.message);
           }
@@ -501,7 +527,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, fileCount: files.length, jarvisOk, errors: errors.length > 0 ? errors : undefined }));
+        res.end(JSON.stringify({ ok: true, fileCount: files.length, jarvisOk, alreadyForwarded, errors: errors.length > 0 ? errors : undefined }));
       } catch (err) {
         console.log('[COMPLETE] Error:', err.message);
         res.writeHead(400, { 'Content-Type': 'application/json' });
