@@ -127,9 +127,11 @@ function formatBytes(bytes) {
 // Persists CDN URLs per list item to disk. After each new URL, debounces
 // a Slack List cell overwrite so rapid uploads batch into one API call.
 const MEDIA_CACHE_FILE = path.join(CACHE_DIR, 'media-links-cache.json');
-const FLUSH_DELAY_MS = 5000; // 5s of silence before flushing to Slack
+const FLUSH_DELAY_MS = 5000; // 5s of silence before flushing the Slack list cell
+const BACKSTOP_DELAY_MS = 30 * 60 * 1000; // 30min of silence before firing Jarvis callback if user never clicks Finish
 const columnIdCache = new Map(); // listId → columnId (in-memory, looked up once per list)
-const flushTimers = new Map();   // cacheKey → timer
+const flushTimers = new Map();   // cacheKey → setTimeout handle (Slack list flush)
+const backstopTimers = new Map(); // cacheKey → setTimeout handle (abandoned-upload Jarvis callback)
 
 function loadMediaCache() {
   try {
@@ -176,6 +178,11 @@ async function getMediaLinksColumnId(listId) {
 }
 
 async function flushMediaLinks(listId, itemId) {
+  // PATH A: Slack list cell update ONLY. Does NOT call Jarvis.
+  // The Jarvis callback now happens only on Path B (POST /upload/complete from the
+  // browser "Finish & Save" click) OR via the 30-min backstop if the user abandons
+  // without clicking Finish. This eliminates the multi-file race that previously
+  // latched callbackSent=true on the first file and lost all subsequent uploads.
   const key = listId + ':' + itemId;
   const cache = loadMediaCache();
   const entry = cache[key];
@@ -203,49 +210,74 @@ async function flushMediaLinks(listId, itemId) {
   } catch (err) {
     console.log(`[CACHE] Flush error for ${key}:`, err.message);
   }
+}
 
-  // Forward to Jarvis dashboard for Queue task creation (once per item)
-  if (!entry.callbackSent && JARVIS_CALLBACK_URL) {
-    try {
-      // Find the token from any active session for this item
-      let token = null;
-      for (const [, session] of uploadSessions) {
-        if (session.payload?.list === listId && session.payload?.item === itemId && session.token) {
-          token = session.token;
-          break;
-        }
-      }
-      // Also check completed sessions stored in cache
-      if (!token) token = entry.token;
-
-      if (token) {
-        const files = entry.urls.map(url => {
-          const name = url.split('/').pop() || 'file';
-          return { name, url, size: 0 };
-        });
-        const cbUrl = new URL('/upload/complete', JARVIS_CALLBACK_URL);
-        const cbRes = await fetch(cbUrl.toString(), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(JARVIS_CALLBACK_TOKEN ? { 'Authorization': 'Bearer ' + JARVIS_CALLBACK_TOKEN } : {}),
-          },
-          body: JSON.stringify({ token, files }),
-        });
-        const cbData = await cbRes.json();
-        if (cbData.ok) {
-          entry.callbackSent = true;
-          saveMediaCache(cache);
-          console.log(`[CACHE] Jarvis callback sent for ${key} — ${files.length} files → Queue`);
-        } else {
-          console.log(`[CACHE] Jarvis callback failed for ${key}: ${cbData.error || 'unknown'}`);
-        }
-      } else {
-        console.log(`[CACHE] No token available for ${key} — skipping Jarvis callback`);
-      }
-    } catch (err) {
-      console.log(`[CACHE] Jarvis callback error for ${key}:`, err.message);
+// Find the auth token to use for the Jarvis callback for a given (list, item).
+// Prefer a live uploadSessions entry (most recent token), falling back to the
+// token captured in the cache when the first file was added.
+function resolveTokenForCallback(listId, itemId, entry) {
+  for (const [, session] of uploadSessions) {
+    if (session.payload?.list === listId && session.payload?.item === itemId && session.token) {
+      return session.token;
     }
+  }
+  return entry?.token || null;
+}
+
+// Fire the Jarvis callback for a (list, item) with the FULL accumulated URL set
+// from the cache. Idempotent via entry.callbackSent. Used by:
+//   - POST /upload/complete (Path B: user clicked Finish & Save)
+//   - the 30-min backstop scheduler (Path A backstop: user abandoned)
+// Returns { ok, alreadyForwarded } so callers can distinguish dedup-skip from
+// network/Slack failures.
+async function fireJarvisCallback(listId, itemId, reason) {
+  const key = listId + ':' + itemId;
+  const cache = loadMediaCache();
+  const entry = cache[key];
+  if (!entry || entry.urls.length === 0) {
+    return { ok: false, alreadyForwarded: false, error: 'no urls cached' };
+  }
+  if (entry.callbackSent) {
+    console.log(`[CALLBACK] (${reason}) ${key} already forwarded — skipping`);
+    return { ok: true, alreadyForwarded: true };
+  }
+  if (!JARVIS_CALLBACK_URL) {
+    return { ok: false, alreadyForwarded: false, error: 'no JARVIS_CALLBACK_URL configured' };
+  }
+  const token = resolveTokenForCallback(listId, itemId, entry);
+  if (!token) {
+    console.log(`[CALLBACK] (${reason}) ${key} — no token available, skipping`);
+    return { ok: false, alreadyForwarded: false, error: 'no token' };
+  }
+  const files = entry.urls.map((url) => ({ name: url.split('/').pop() || 'file', url, size: 0 }));
+  try {
+    const cbUrl = new URL('/upload/complete', JARVIS_CALLBACK_URL);
+    const cbRes = await fetch(cbUrl.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(JARVIS_CALLBACK_TOKEN ? { 'Authorization': 'Bearer ' + JARVIS_CALLBACK_TOKEN } : {}),
+      },
+      body: JSON.stringify({ token, files }),
+    });
+    const cbData = await cbRes.json();
+    if (cbData.ok) {
+      entry.callbackSent = true;
+      saveMediaCache(cache);
+      // Cancel any pending backstop — we just fired the callback.
+      if (backstopTimers.has(key)) {
+        clearTimeout(backstopTimers.get(key));
+        backstopTimers.delete(key);
+      }
+      console.log(`[CALLBACK] (${reason}) ${key} → Jarvis ok=true (${files.length} files)`);
+      return { ok: true, alreadyForwarded: false };
+    } else {
+      console.log(`[CALLBACK] (${reason}) ${key} → Jarvis ok=false error=${cbData.error || 'unknown'}`);
+      return { ok: false, alreadyForwarded: false, error: cbData.error };
+    }
+  } catch (err) {
+    console.log(`[CALLBACK] (${reason}) ${key} → exception:`, err.message);
+    return { ok: false, alreadyForwarded: false, error: err.message };
   }
 }
 
@@ -253,12 +285,26 @@ function scheduleFlush(listId, itemId) {
   const key = listId + ':' + itemId;
   // Clear existing timer — resets the debounce
   if (flushTimers.has(key)) clearTimeout(flushTimers.get(key));
-  // Set new timer
   const timer = setTimeout(() => {
     flushTimers.delete(key);
     flushMediaLinks(listId, itemId);
   }, FLUSH_DELAY_MS);
   flushTimers.set(key, timer);
+}
+
+// 30-min backstop: if the user finishes uploading but never clicks "Finish & Save",
+// fire the Jarvis callback automatically so the Queue task still gets created.
+// Re-armed on every file completion so it always fires 30min after the LAST
+// activity. Cancelled if Path B (POST /upload/complete) wins first.
+function scheduleBackstop(listId, itemId) {
+  const key = listId + ':' + itemId;
+  if (backstopTimers.has(key)) clearTimeout(backstopTimers.get(key));
+  const timer = setTimeout(async () => {
+    backstopTimers.delete(key);
+    console.log(`[BACKSTOP] ${key} — 30min elapsed since last upload, firing Jarvis callback`);
+    await fireJarvisCallback(listId, itemId, 'backstop');
+  }, BACKSTOP_DELAY_MS);
+  backstopTimers.set(key, timer);
 }
 
 // ─── In-memory upload session tracking ─────────────────────────────────
@@ -350,10 +396,12 @@ const tusServer = new TusServer({
       session.bunnyName = safeName;
       console.log(`[TUS] Bunny push complete for "${session.originalName}" → ${cdnUrl}`);
 
-      // Cache URL and schedule debounced Slack List update + Queue task
+      // Cache URL, debounce Slack list cell update (Path A), arm 30-min abandonment backstop.
+      // The Jarvis callback fires ONLY on Path B (Finish click) or the backstop — never here.
       if (session.payload.list && session.payload.item) {
         addUrlToCache(session.payload.list, session.payload.item, cdnUrl, session.token);
         scheduleFlush(session.payload.list, session.payload.item);
+        scheduleBackstop(session.payload.list, session.payload.item);
       }
 
       // Clean up local file
@@ -471,63 +519,49 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        console.log(`[COMPLETE] ${files.length} files for "${payload.name}" — forwarding to Jarvis...`);
+        console.log(`[COMPLETE] ${files.length} files for "${payload.name}" — firing Jarvis callback (sole trigger; Path A is Slack-list-only)`);
 
-        // Dedupe with the cache-flush path. Both this manual handler and
-        // flushMediaLinks() POST to Jarvis /upload/complete; without a shared
-        // flag they race and produce two Queue tasks + two Slack confirmations.
-        // Use the same media-links-cache callbackSent gate.
         const cacheKey = payload.list + ':' + payload.item;
         const cache = loadMediaCache();
         if (!cache[cacheKey]) cache[cacheKey] = { urls: [], lastFlushed: 0 };
-        const cacheEntry = cache[cacheKey];
 
-        // Cancel any pending debounced flush — we're sending now.
+        // Cancel any pending Slack-list debounce — we'll force-flush below.
         if (flushTimers.has(cacheKey)) {
           clearTimeout(flushTimers.get(cacheKey));
           flushTimers.delete(cacheKey);
           console.log(`[COMPLETE] Cleared pending debounce for ${cacheKey}`);
         }
-
-        let jarvisOk = false;
-        let alreadyForwarded = false;
-        if (cacheEntry.callbackSent) {
-          alreadyForwarded = true;
-          jarvisOk = true;
-          console.log(`[COMPLETE] Jarvis callback already sent for ${cacheKey} — skipping (dedup)`);
-        } else if (JARVIS_CALLBACK_URL) {
-          try {
-            const callbackBody = JSON.stringify({ token, files });
-            const cbUrl = new URL('/upload/complete', JARVIS_CALLBACK_URL);
-            const cbRes = await fetch(cbUrl.toString(), {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...(JARVIS_CALLBACK_TOKEN ? { 'Authorization': 'Bearer ' + JARVIS_CALLBACK_TOKEN } : {}),
-              },
-              body: callbackBody,
-            });
-            const cbData = await cbRes.json();
-            jarvisOk = cbData.ok;
-            if (cbData.ok) {
-              cacheEntry.callbackSent = true;
-              saveMediaCache(cache);
-              console.log(`[COMPLETE] Jarvis callback: ok=true — marked callbackSent for ${cacheKey}`);
-            } else {
-              console.log(`[COMPLETE] Jarvis callback: ok=false` + (cbData.error ? ` error=${cbData.error}` : ''));
-            }
-          } catch (err) {
-            console.log(`[COMPLETE] Jarvis callback error:`, err.message);
-          }
+        // Cancel the 30-min abandonment backstop — user clicked Finish, no need.
+        if (backstopTimers.has(cacheKey)) {
+          clearTimeout(backstopTimers.get(cacheKey));
+          backstopTimers.delete(cacheKey);
+          console.log(`[COMPLETE] Cancelled abandonment backstop for ${cacheKey}`);
         }
 
-        // Clean up sessions
+        // Force an immediate Slack list cell update so all files are visible right away
+        // (don't wait for the cancelled debounce).
+        await flushMediaLinks(payload.list, payload.item);
+
+        // Path B is now the SOLE Jarvis-callback trigger (besides the 30-min backstop).
+        // fireJarvisCallback uses the FULL accumulated URL set from the cache (not just
+        // this batch's `files`), so any URLs that landed via TUS but weren't included
+        // in the browser's uploadIds — and any that were added in the gap between this
+        // POST and previous flushes — are all included.
+        const cbResult = await fireJarvisCallback(payload.list, payload.item, 'finish-click');
+
+        // Clean up sessions only for uploads we explicitly handled in this batch.
         for (const id of uploadIds) {
           uploadSessions.delete(id);
         }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, fileCount: files.length, jarvisOk, alreadyForwarded, errors: errors.length > 0 ? errors : undefined }));
+        res.end(JSON.stringify({
+          ok: true,
+          fileCount: files.length,
+          jarvisOk: cbResult.ok,
+          alreadyForwarded: cbResult.alreadyForwarded,
+          errors: errors.length > 0 ? errors : undefined,
+        }));
       } catch (err) {
         console.log('[COMPLETE] Error:', err.message);
         res.writeHead(400, { 'Content-Type': 'application/json' });
