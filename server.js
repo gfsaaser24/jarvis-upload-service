@@ -123,14 +123,11 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-// ─── Media Links Cache (persistent, debounced Slack flush) ────────────
-// Persists CDN URLs per list item to disk. After each new URL, debounces
-// a Slack List cell overwrite so rapid uploads batch into one API call.
+// ─── Media Links Cache (persistent CDN-URL accumulation) ──────────────
+// Persists CDN URLs per list item to disk so the Jarvis callback can be
+// fired with the full accumulated URL set for an upload session.
 const MEDIA_CACHE_FILE = path.join(CACHE_DIR, 'media-links-cache.json');
-const FLUSH_DELAY_MS = 5000; // 5s of silence before flushing the Slack list cell
 const BACKSTOP_DELAY_MS = 30 * 60 * 1000; // 30min of silence before firing Jarvis callback if user never clicks Finish
-const columnIdCache = new Map(); // listId → columnId (in-memory, looked up once per list)
-const flushTimers = new Map();   // cacheKey → setTimeout handle (Slack list flush)
 const backstopTimers = new Map(); // cacheKey → setTimeout handle (abandoned-upload Jarvis callback)
 
 function loadMediaCache() {
@@ -148,7 +145,7 @@ function saveMediaCache(cache) {
 function addUrlToCache(listId, itemId, url, token) {
   const cache = loadMediaCache();
   const key = listId + ':' + itemId;
-  if (!cache[key]) cache[key] = { urls: [], lastFlushed: 0 };
+  if (!cache[key]) cache[key] = { urls: [] };
   if (!cache[key].urls.includes(url)) {
     cache[key].urls.push(url);
     // Store token for Jarvis callback (persists across container restarts)
@@ -157,59 +154,6 @@ function addUrlToCache(listId, itemId, url, token) {
     console.log(`[CACHE] Added URL to ${key} (${cache[key].urls.length} total)`);
   }
   return { key, count: cache[key].urls.length };
-}
-
-async function getMediaLinksColumnId(listId) {
-  if (columnIdCache.has(listId)) return columnIdCache.get(listId);
-  if (!SLACK_USER_TOKEN) return null;
-  try {
-    const info = await slackApi(SLACK_USER_TOKEN, 'files.info', { file: listId }, true);
-    if (!info.ok) { console.log('[CACHE] files.info failed:', info.error); return null; }
-    const schema = info.file?.list_metadata?.schema || [];
-    const col = schema.find(c => c.name === 'Media Links');
-    if (col) {
-      columnIdCache.set(listId, col.id);
-      console.log(`[CACHE] Media Links column for ${listId}: ${col.id}`);
-      return col.id;
-    }
-    console.log(`[CACHE] "Media Links" column not found in ${schema.length} columns`);
-  } catch (err) { console.log('[CACHE] Column lookup error:', err.message); }
-  return null;
-}
-
-async function flushMediaLinks(listId, itemId) {
-  // PATH A: Slack list cell update ONLY. Does NOT call Jarvis.
-  // The Jarvis callback now happens only on Path B (POST /upload/complete from the
-  // browser "Finish & Save" click) OR via the 30-min backstop if the user abandons
-  // without clicking Finish. This eliminates the multi-file race that previously
-  // latched callbackSent=true on the first file and lost all subsequent uploads.
-  const key = listId + ':' + itemId;
-  const cache = loadMediaCache();
-  const entry = cache[key];
-  if (!entry || entry.urls.length === 0) return;
-
-  const colId = await getMediaLinksColumnId(listId);
-  if (!colId) { console.log(`[CACHE] Cannot flush ${key} — no column ID`); return; }
-
-  const textLines = entry.urls.join('\n\n');
-  const richText = [{ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: textLines }] }] }];
-
-  try {
-    const result = await slackApi(SLACK_USER_TOKEN, 'slackLists.items.update', {
-      list_id: listId,
-      cells: [{ row_id: itemId, column_id: colId, rich_text: richText }],
-    }, true);
-
-    if (result.ok) {
-      entry.lastFlushed = Date.now();
-      saveMediaCache(cache);
-      console.log(`[CACHE] Flushed ${entry.urls.length} URLs to Slack for ${key}`);
-    } else {
-      console.log(`[CACHE] Slack update failed for ${key}: ${result.error}`);
-    }
-  } catch (err) {
-    console.log(`[CACHE] Flush error for ${key}:`, err.message);
-  }
 }
 
 // Find the auth token to use for the Jarvis callback for a given (list, item).
@@ -225,21 +169,19 @@ function resolveTokenForCallback(listId, itemId, entry) {
 }
 
 // Fire the Jarvis callback for a (list, item) with the FULL accumulated URL set
-// from the cache. Idempotent via entry.callbackSent. Used by:
-//   - POST /upload/complete (Path B: user clicked Finish & Save)
-//   - the 30-min backstop scheduler (Path A backstop: user abandoned)
-// Returns { ok, alreadyForwarded } so callers can distinguish dedup-skip from
-// network/Slack failures.
+// from the cache. Used by:
+//   - POST /upload/complete (user clicked Finish & Save)
+//   - the 30-min backstop scheduler (user abandoned without clicking Finish)
+// No local dedup latch: the dashboard de-duplicates by its own database
+// (appended_urls), so every callback is safe to send.
+// Returns { ok, alreadyForwarded } — alreadyForwarded is always false now,
+// kept in the shape so callers don't need to change.
 async function fireJarvisCallback(listId, itemId, reason) {
   const key = listId + ':' + itemId;
   const cache = loadMediaCache();
   const entry = cache[key];
   if (!entry || entry.urls.length === 0) {
     return { ok: false, alreadyForwarded: false, error: 'no urls cached' };
-  }
-  if (entry.callbackSent) {
-    console.log(`[CALLBACK] (${reason}) ${key} already forwarded — skipping`);
-    return { ok: true, alreadyForwarded: true };
   }
   if (!JARVIS_CALLBACK_URL) {
     return { ok: false, alreadyForwarded: false, error: 'no JARVIS_CALLBACK_URL configured' };
@@ -262,8 +204,6 @@ async function fireJarvisCallback(listId, itemId, reason) {
     });
     const cbData = await cbRes.json();
     if (cbData.ok) {
-      entry.callbackSent = true;
-      saveMediaCache(cache);
       // Cancel any pending backstop — we just fired the callback.
       if (backstopTimers.has(key)) {
         clearTimeout(backstopTimers.get(key));
@@ -279,17 +219,6 @@ async function fireJarvisCallback(listId, itemId, reason) {
     console.log(`[CALLBACK] (${reason}) ${key} → exception:`, err.message);
     return { ok: false, alreadyForwarded: false, error: err.message };
   }
-}
-
-function scheduleFlush(listId, itemId) {
-  const key = listId + ':' + itemId;
-  // Clear existing timer — resets the debounce
-  if (flushTimers.has(key)) clearTimeout(flushTimers.get(key));
-  const timer = setTimeout(() => {
-    flushTimers.delete(key);
-    flushMediaLinks(listId, itemId);
-  }, FLUSH_DELAY_MS);
-  flushTimers.set(key, timer);
 }
 
 // 30-min backstop: if the user finishes uploading but never clicks "Finish & Save",
@@ -396,11 +325,11 @@ const tusServer = new TusServer({
       session.bunnyName = safeName;
       console.log(`[TUS] Bunny push complete for "${session.originalName}" → ${cdnUrl}`);
 
-      // Cache URL, debounce Slack list cell update (Path A), arm 30-min abandonment backstop.
-      // The Jarvis callback fires ONLY on Path B (Finish click) or the backstop — never here.
+      // Cache URL and arm the 30-min abandonment backstop. The Jarvis callback
+      // fires ONLY on the Finish click (POST /upload/complete) or the backstop —
+      // never here. The dashboard owns all Slack-list writes.
       if (session.payload.list && session.payload.item) {
         addUrlToCache(session.payload.list, session.payload.item, cdnUrl, session.token);
-        scheduleFlush(session.payload.list, session.payload.item);
         scheduleBackstop(session.payload.list, session.payload.item);
       }
 
@@ -519,18 +448,10 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        console.log(`[COMPLETE] ${files.length} files for "${payload.name}" — firing Jarvis callback (sole trigger; Path A is Slack-list-only)`);
+        console.log(`[COMPLETE] ${files.length} files for "${payload.name}" — firing Jarvis callback`);
 
         const cacheKey = payload.list + ':' + payload.item;
-        const cache = loadMediaCache();
-        if (!cache[cacheKey]) cache[cacheKey] = { urls: [], lastFlushed: 0 };
 
-        // Cancel any pending Slack-list debounce — we'll force-flush below.
-        if (flushTimers.has(cacheKey)) {
-          clearTimeout(flushTimers.get(cacheKey));
-          flushTimers.delete(cacheKey);
-          console.log(`[COMPLETE] Cleared pending debounce for ${cacheKey}`);
-        }
         // Cancel the 30-min abandonment backstop — user clicked Finish, no need.
         if (backstopTimers.has(cacheKey)) {
           clearTimeout(backstopTimers.get(cacheKey));
@@ -538,15 +459,10 @@ const server = http.createServer(async (req, res) => {
           console.log(`[COMPLETE] Cancelled abandonment backstop for ${cacheKey}`);
         }
 
-        // Force an immediate Slack list cell update so all files are visible right away
-        // (don't wait for the cancelled debounce).
-        await flushMediaLinks(payload.list, payload.item);
-
-        // Path B is now the SOLE Jarvis-callback trigger (besides the 30-min backstop).
-        // fireJarvisCallback uses the FULL accumulated URL set from the cache (not just
-        // this batch's `files`), so any URLs that landed via TUS but weren't included
-        // in the browser's uploadIds — and any that were added in the gap between this
-        // POST and previous flushes — are all included.
+        // Fire the Jarvis callback with the FULL accumulated URL set from the cache
+        // (not just this batch's `files`), so any URLs that landed via TUS but weren't
+        // included in the browser's uploadIds are still forwarded. The dashboard owns
+        // de-duplication and the Slack-list "Media Links" write.
         const cbResult = await fireJarvisCallback(payload.list, payload.item, 'finish-click');
 
         // Clean up sessions only for uploads we explicitly handled in this batch.
