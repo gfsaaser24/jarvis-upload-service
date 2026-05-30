@@ -257,7 +257,7 @@ setInterval(() => {
 const tusServer = new TusServer({
   path: '/tus',
   datastore: new FileStore({ directory: UPLOAD_DIR }),
-  maxSize: 5 * 1024 * 1024 * 1024, // 5GB max
+  maxSize: 64 * 1024 * 1024 * 1024, // 64GB (raised from 5GB — box has 187GB free, streams to Bunny)
   respectForwardedHeaders: true,
   generateUrl(req, { proto, host, path, id }) {
     // Force HTTPS since we're behind Traefik SSL termination
