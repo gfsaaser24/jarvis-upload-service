@@ -7,7 +7,9 @@ import { Server as TusServer } from '@tus/server';
 import { FileStore } from '@tus/file-store';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const UPLOAD_DIR = process.env.UPLOAD_DIR || '/tmp/uploads';
+// Persistent volume-backed so in-flight uploads survive a container restart/redeploy
+// (was /tmp/uploads = ephemeral overlay; a mid-upload deploy orphaned everything).
+const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
 const UPLOAD_SECRET = process.env.UPLOAD_SECRET;
 const BUNNY_STORAGE_ZONE = process.env.BUNNY_STORAGE_ZONE;
 const BUNNY_STORAGE_PASSWORD = process.env.BUNNY_STORAGE_PASSWORD;
@@ -284,10 +286,28 @@ const tusServer = new TusServer({
     return res;
   },
   async onUploadFinish(req, res, upload) {
-    const session = uploadSessions.get(upload.id);
+    let session = uploadSessions.get(upload.id);
     if (!session) {
-      console.log(`[TUS] Upload finished but no session: ${upload.id}`);
-      return res;
+      // Session lost — e.g. the container restarted mid-upload and this upload resumed
+      // from the persistent store, so onUploadCreate never re-fired. Rebuild the session
+      // from the tus metadata (which carries the token) instead of dropping the file.
+      const token = upload.metadata?.token;
+      const payload = token ? validateUploadToken(token) : null;
+      if (!payload) {
+        console.log(`[TUS] Upload finished but no session and no valid token: ${upload.id}`);
+        return res;
+      }
+      session = {
+        token,
+        payload,
+        originalName: upload.metadata?.filename || upload.metadata?.name || 'file',
+        contentType: upload.metadata?.filetype || upload.metadata?.type || 'application/octet-stream',
+        size: upload.size,
+        createdAt: Date.now(),
+        cdnUrl: null,
+      };
+      uploadSessions.set(upload.id, session);
+      console.log(`[TUS] Rebuilt session from metadata for resumed upload: ${upload.id} "${session.originalName}"`);
     }
 
     const localPath = path.join(UPLOAD_DIR, upload.id);
@@ -431,24 +451,28 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        // Collect CDN URLs from completed uploads
-        const files = [];
+        // Authoritative "what actually reached the tracker" = the persistent per-item URL
+        // cache (survives restarts), NOT the in-memory session match. The browser's
+        // uploadIds may reference sessions from a prior container generation (lost on a
+        // restart) — that is NOT a failure: the file's URL is in the cache and gets
+        // forwarded below. Only surface REAL per-file errors (Bunny push failures) still visible.
+        const cache = loadMediaCache();
+        const cacheEntry = cache[payload.list + ':' + payload.item];
+        const forwardedCount = cacheEntry?.urls?.length || 0;
+
         const errors = [];
         for (const id of uploadIds) {
           const session = uploadSessions.get(id);
-          if (!session) { errors.push(`Unknown upload: ${id}`); continue; }
-          if (session.bunnyError) { errors.push(`${session.originalName}: ${session.bunnyError}`); continue; }
-          if (!session.cdnUrl) { errors.push(`${session.originalName}: not yet uploaded to CDN`); continue; }
-          files.push({ name: session.originalName, url: session.cdnUrl, size: session.size || 0 });
+          if (session?.bunnyError) errors.push(`${session.originalName}: ${session.bunnyError}`);
         }
 
-        if (files.length === 0) {
+        if (forwardedCount === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'No files uploaded to CDN', details: errors }));
+          res.end(JSON.stringify({ ok: false, error: 'No files reached the CDN', details: errors }));
           return;
         }
 
-        console.log(`[COMPLETE] ${files.length} files for "${payload.name}" — firing Jarvis callback`);
+        console.log(`[COMPLETE] ${forwardedCount} files for "${payload.name}" — firing Jarvis callback`);
 
         const cacheKey = payload.list + ':' + payload.item;
 
@@ -473,7 +497,8 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           ok: true,
-          fileCount: files.length,
+          fileCount: forwardedCount,
+          expected: uploadIds.length,
           jarvisOk: cbResult.ok,
           alreadyForwarded: cbResult.alreadyForwarded,
           errors: errors.length > 0 ? errors : undefined,
