@@ -272,15 +272,33 @@
   'use strict';
 
   var token = new URLSearchParams(location.search).get('t');
-  var isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || window.innerWidth < 768;
-  var CHUNK_SIZE = 5 * 1024 * 1024;
+  var ua = navigator.userAgent;
+  // In-app webviews (Slack, Facebook, Instagram, etc.) freeze background tabs hard and
+  // behave like constrained mobile clients even on desktop — treat them as mobile.
+  var isInAppBrowser = /Slack|FBAN|FBAV|Instagram|Line\/|Twitter|MicroMessenger|; wv\)/i.test(ua);
+  var isMobile = /iPhone|iPad|iPod|Android/i.test(ua) || isInAppBrowser || window.innerWidth < 768;
+  var CHUNK_SIZE = isMobile ? 2 * 1024 * 1024 : 5 * 1024 * 1024;
   var MAX_FILES = 1000;
-  var MAX_CONCURRENT = isMobile ? 1 : 3;
+  var BASE_CONCURRENT = isMobile ? 1 : 3;
   var RETRY_DELAYS = [0, 1000, 3000, 5000, 10000, 15000, 30000];
 
   var files = [];
   var completedUploadIds = [];
-  var activeUploads = 0;
+  var errorCount = 0;
+
+  // Slots in use = files actively uploading (or briefly stalled between retries).
+  // Derived from status, never hand-maintained, so pause/stall/retry cannot desync it.
+  function countActive() {
+    var n = 0;
+    for (var i = 0; i < files.length; i++) {
+      if (files[i].status === 'uploading' || files[i].status === 'stalled') n++;
+    }
+    return n;
+  }
+  // Back off to serial uploads once we've seen failures (flaky shop Wi-Fi protection).
+  function getMaxConcurrent() {
+    return errorCount >= 2 ? 1 : BASE_CONCURRENT;
+  }
   var wakeLock = null;
   var totalBytes = 0;
   var lastSpeedTime = 0;
@@ -342,33 +360,20 @@
     wakeBanner.classList.remove('visible');
   }
 
-  // ─── Visibility change — pause/resume ─────────────────────────────
+  // ─── Visibility change — keep running (do NOT abort) ──────────────
+  // Aborting an in-flight chunk when the tab is backgrounded (app switch,
+  // notification, Slack -> browser flip) is what surfaces as
+  // "failed to upload chunk at offset 0 ... [object ProgressEvent]". Let tus keep
+  // uploading; if the OS truly suspends the tab, tus resumes via its own retry on wake.
   document.addEventListener('visibilitychange', function() {
-    if (document.visibilityState === 'hidden') {
-      files.forEach(function(f) {
-        if ((f.status === 'uploading' || f.status === 'stalled') && f.tusUpload) {
-          clearStallTimer(f);
-          f.tusUpload.abort();
-          f.status = 'paused';
-          updateFileCard(f);
-        }
-      });
-    } else {
-      files.forEach(function(f) {
-        if (f.status === 'paused' && f.tusUpload) {
-          f.status = 'uploading';
-          f.tusUpload.start();
-          resetStallTimer(f);
-          updateFileCard(f);
-        }
-      });
-      if (activeUploads > 0 && !wakeLock) requestWakeLock();
+    if (document.visibilityState === 'visible') {
+      if (countActive() > 0 && !wakeLock) requestWakeLock();
     }
   });
 
   // ─── Warn before leaving ──────────────────────────────────────────
   window.addEventListener('beforeunload', function(e) {
-    if (activeUploads > 0) { e.preventDefault(); e.returnValue = ''; }
+    if (countActive() > 0) { e.preventDefault(); e.returnValue = ''; }
   });
 
   // ─── Token verification ───────────────────────────────────────────
@@ -497,7 +502,7 @@
 
   // ─── Upload queue ─────────────────────────────────────────────────
   function processQueue() {
-    while (activeUploads < MAX_CONCURRENT) {
+    while (countActive() < getMaxConcurrent()) {
       var next = null;
       for (var i = 0; i < files.length; i++) {
         if (files[i].status === 'queued') { next = files[i]; break; }
@@ -525,39 +530,46 @@
     if (entry.status !== 'uploading') return;
     entry.stallCount = (entry.stallCount || 0) + 1;
     if (entry.stallCount > MAX_STALL_RETRIES) {
-      // Give up after too many stalls
+      // Give up after too many stalls (status='error' frees the slot via countActive)
       clearStallTimer(entry);
       entry.status = 'error';
       entry.error = 'Upload stalled after ' + MAX_STALL_RETRIES + ' retries';
-      activeUploads--;
+      errorCount++;
       updateFileCard(entry);
       processQueue();
       return;
     }
-    // Show stalled status and auto-retry
+    // Show stalled status, then restart with a FRESH tus instance that resumes from the
+    // server's last-known offset (HEAD). Restarting the aborted instance in-place is
+    // fragile (tus's abort/error race can wedge it) and can itself emit offset-0 aborts.
     entry.status = 'stalled';
     updateFileCard(entry);
-    if (entry.tusUpload) {
-      entry.tusUpload.abort();
-    }
-    // Wait a moment then restart — TUS will resume via HEAD from last offset
     setTimeout(function() {
       if (entry.status !== 'stalled') return; // user may have manually retried
-      entry.status = 'uploading';
-      updateFileCard(entry);
-      if (entry.tusUpload) {
-        entry.tusUpload.start();
-        resetStallTimer(entry);
-      }
+      restartUpload(entry, false); // false = resume, don't discard server-side progress
     }, 2000);
+  }
+
+  // Tear down an entry's current tus instance and start a new one. Nulling tusUpload
+  // first "supersedes" the old instance so any late/racing callback is ignored (see the
+  // guards in startUpload). fresh=true discards resume state and uploads from zero.
+  function restartUpload(entry, fresh) {
+    var old = entry.tusUpload;
+    entry.tusUpload = null;
+    clearStallTimer(entry);
+    if (old) { try { old.abort(); } catch (e) {} }
+    entry.fresh = !!fresh;
+    startUpload(entry);
   }
 
   // ─── Core TUS upload ──────────────────────────────────────────────
   function startUpload(entry) {
     entry.status = 'uploading';
     entry.stallCount = 0;
-    activeUploads++;
     updateFileCard(entry);
+
+    var fresh = !!entry.fresh;
+    entry.fresh = false;
 
     var upload = new tus.Upload(entry.file, {
       endpoint: '/tus/',
@@ -569,15 +581,20 @@
         filename: entry.file.name,
         filetype: entry.file.type || 'application/octet-stream',
       },
+      // Every callback ignores itself if this entry has moved on to a newer tus
+      // instance (retry / stall-restart) or been cleared. Kills late/racing callbacks
+      // from a superseded upload corrupting state.
       onError: function(err) {
+        if (entry.tusUpload !== upload) return;
         clearStallTimer(entry);
         entry.status = 'error';
         entry.error = err.message || 'Upload failed';
-        activeUploads--;
+        errorCount++;
         updateFileCard(entry);
         processQueue();
       },
       onProgress: function(bytesUploaded, bytesTotal) {
+        if (entry.tusUpload !== upload) return;
         entry.stallCount = 0; // reset stall count on any progress
         resetStallTimer(entry);
         entry.bytesUploaded = bytesUploaded;
@@ -586,6 +603,7 @@
         updateOverallProgress();
       },
       onSuccess: function() {
+        if (entry.tusUpload !== upload) return;
         clearStallTimer(entry);
         var uploadUrl = upload.url || '';
         var tusId = uploadUrl.split('/').pop();
@@ -596,7 +614,6 @@
         entry.status = 'complete';
         entry.progress = 1;
         entry.bytesUploaded = entry.file.size;
-        activeUploads--;
         updateFileCard(entry);
         updateOverallProgress();
         processQueue();
@@ -604,29 +621,38 @@
     });
 
     entry.tusUpload = upload;
-    resetStallTimer(entry); // start stall detection immediately
 
-    // Resume previous upload if available (cross-session resume)
-    upload.findPreviousUploads().then(function(prev) {
-      if (prev.length > 0) {
-        resumeBanner.classList.add('visible');
-        setTimeout(function() { resumeBanner.classList.remove('visible'); }, 5000);
-        upload.resumeUpload(prev[0]);
-      } else {
-        upload.start();
-      }
-    });
+    if (fresh) {
+      // Explicit retry: start from zero, ignore any stale resume fingerprint.
+      upload.start();
+      resetStallTimer(entry); // Fix: only arm the stall clock once network I/O begins
+    } else {
+      upload.findPreviousUploads().then(function(prev) {
+        if (entry.tusUpload !== upload) return; // superseded during the async IDB lookup
+        if (prev.length > 0) {
+          resumeBanner.classList.add('visible');
+          setTimeout(function() { resumeBanner.classList.remove('visible'); }, 5000);
+          upload.resumeUpload(prev[0]);
+        } else {
+          upload.start();
+        }
+        resetStallTimer(entry); // armed after resume/start, not before the IDB lookup
+      });
+    }
   }
 
   function retryUpload(entry) {
-    clearStallTimer(entry);
     entry.status = 'queued';
     entry.stallCount = 0;
     entry.progress = 0;
     entry.bytesUploaded = 0;
     entry.error = null;
-    entry.tusUpload = null;
     entry.tusId = null;
+    entry.fresh = true; // explicit retry starts clean (no stale fingerprint resume)
+    var old = entry.tusUpload;
+    entry.tusUpload = null;              // supersede: old instance's callbacks now ignored
+    clearStallTimer(entry);
+    if (old) { try { old.abort(); } catch (e) {} }
     updateFileCard(entry);
     processQueue();
   }
