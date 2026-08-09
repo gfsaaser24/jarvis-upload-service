@@ -514,8 +514,8 @@
   }
 
   // ─── Stall detection ───────────────────────────────────────────────
-  var STALL_TIMEOUT = 30000; // 30 seconds with no progress = stalled
-  var MAX_STALL_RETRIES = 5;
+  var STALL_TIMEOUT = 90000; // 90 seconds with no progress = stalled (raised from 30s — slow shop uploads of multi-GB files were tripping this mid-chunk)
+  var MAX_STALL_RETRIES = 30; // raised from 5 — each retry resumes from the server's last offset, so they're cheap; large files on flaky connections were erroring out after 5 stalls
 
   function clearStallTimer(entry) {
     if (entry.stallTimer) { clearTimeout(entry.stallTimer); entry.stallTimer = null; }
