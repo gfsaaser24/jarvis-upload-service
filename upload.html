@@ -92,6 +92,8 @@
   .drop-zone .label { font-size: 1rem; color: var(--text); margin-bottom: 4px; }
   .drop-zone .sublabel { font-size: 0.85rem; color: var(--text-muted); }
   .drop-zone input[type="file"] { display: none; }
+  .alt-pick-btn { display:block; width:100%; margin-top:10px; background:none; border:none; color:var(--text-muted); font-size:0.85rem; text-decoration:underline; cursor:pointer; }
+  .file-card .file-status.checking { color: var(--text-muted); }
 
   .file-list { margin-top: 16px; }
   .file-card {
@@ -238,10 +240,12 @@
 
     <div class="drop-zone" id="drop-zone">
       <div class="dz-icon">&#128206;</div>
-      <div class="label">Tap to select files</div>
-      <div class="sublabel">or drag and drop &mdash; videos, photos, any files</div>
-      <input type="file" id="file-input" multiple>
+      <div class="label">Tap to select photos &amp; videos</div>
+      <div class="sublabel">or drag and drop</div>
+      <input type="file" id="file-input" accept="image/*,video/*" multiple>
+      <input type="file" id="file-input-any" multiple>
     </div>
+    <button type="button" class="alt-pick-btn" id="any-file-btn">Send a different file type (documents, zip)</button>
 
     <div class="file-list" id="file-list"></div>
 
@@ -397,6 +401,12 @@
     fileInput.value = '';
   });
 
+  // Fallback picker: unfiltered input for documents/zip/etc. Android's photo picker
+  // (triggered by accept="image/*,video/*") hides non-media files entirely.
+  var fileInputAny = document.getElementById('file-input-any');
+  fileInputAny.addEventListener('change', function() { if (fileInputAny.files.length > 0) addFiles(fileInputAny.files); fileInputAny.value = ''; });
+  document.getElementById('any-file-btn').addEventListener('click', function() { fileInputAny.click(); });
+
   dropZone.addEventListener('dragenter', function(e) { e.preventDefault(); dropZone.classList.add('dragover'); });
   dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('dragover'); });
   dropZone.addEventListener('dragleave', function() { dropZone.classList.remove('dragover'); });
@@ -405,6 +415,34 @@
     dropZone.classList.remove('dragover');
     if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files);
   });
+
+  // ─── Readability probe ────────────────────────────────────────────
+  // Google Photos / cloud-backed placeholders report a real size but never yield
+  // bytes (crbug 41452449). tus would open the upload and hang forever at offset 0,
+  // so read the first chunk up front and fail fast with actionable instructions.
+  var PROBE_BYTES = 65536;
+  var PROBE_TIMEOUT = 20000;
+  var CLOUD_MSG = 'Could not read this file. If it is a Google Photos video, open Google Photos, tap the ⋮ menu, choose Download, wait for it to finish, then try again.';
+
+  function readFirstBytes(file) {
+    return new Promise(function(resolve, reject) {
+      var blob = file.slice(0, Math.min(PROBE_BYTES, file.size));
+      if (blob.arrayBuffer) { blob.arrayBuffer().then(resolve, reject); return; }
+      var fr = new FileReader();
+      fr.onload = function() { resolve(fr.result); };
+      fr.onerror = function() { reject(fr.error || new Error('read failed')); };
+      fr.readAsArrayBuffer(blob);
+    });
+  }
+
+  function verifyReadable(entry) {
+    var settled = false;
+    function fail(msg) { if (settled) return; settled = true; entry.status = 'error'; entry.error = msg; errorCount++; updateFileCard(entry); processQueue(); }
+    function pass() { if (settled) return; settled = true; entry.status = 'queued'; updateFileCard(entry); processQueue(); }
+    if (entry.file.size === 0) { fail('File is empty (0 bytes) — cannot upload'); return; }
+    var timer = setTimeout(function() { fail(CLOUD_MSG); }, PROBE_TIMEOUT);
+    readFirstBytes(entry.file).then(function(buf) { clearTimeout(timer); if (!buf || buf.byteLength === 0) { fail(CLOUD_MSG); return; } pass(); }, function() { clearTimeout(timer); fail(CLOUD_MSG); });
+  }
 
   function addFiles(fileList) {
     var newFiles = Array.from(fileList);
@@ -416,16 +454,17 @@
       var entry = {
         id: Math.random().toString(36).substr(2, 9),
         file: file,
-        status: file.size === 0 ? 'error' : 'queued',
+        status: 'checking',
         progress: 0,
         bytesUploaded: 0,
         tusUpload: null,
         tusId: null,
-        error: file.size === 0 ? 'File is empty (0 bytes) — cannot upload' : null,
+        error: null,
       };
       files.push(entry);
       totalBytes += file.size;
       createFileCard(entry);
+      verifyReadable(entry);
     });
     overallEl.classList.add('visible');
     updateOverallProgress();
@@ -480,7 +519,9 @@
     while (status.firstChild) status.removeChild(status.firstChild);
     status.className = 'file-status ' + entry.status;
 
-    if (entry.status === 'queued') {
+    if (entry.status === 'checking') {
+      status.textContent = 'Checking file…';
+    } else if (entry.status === 'queued') {
       status.textContent = 'Queued';
     } else if (entry.status === 'uploading') {
       status.textContent = 'Uploading... ' + Math.round(entry.progress * 100) + '%';
@@ -529,6 +570,9 @@
   function handleStall(entry) {
     if (entry.status !== 'uploading') return;
     entry.stallCount = (entry.stallCount || 0) + 1;
+    // Not a single byte through after 2 stalls => unreadable cloud placeholder, not
+    // flaky Wi-Fi. 30 more resume attempts all restart from offset 0 and never finish.
+    if (entry.bytesUploaded === 0 && entry.stallCount >= 2) { clearStallTimer(entry); entry.status = 'error'; entry.error = CLOUD_MSG; errorCount++; updateFileCard(entry); processQueue(); return; }
     if (entry.stallCount > MAX_STALL_RETRIES) {
       // Give up after too many stalls (status='error' frees the slot via countActive)
       clearStallTimer(entry);
@@ -588,7 +632,7 @@
         if (entry.tusUpload !== upload) return;
         clearStallTimer(entry);
         entry.status = 'error';
-        entry.error = err.message || 'Upload failed';
+        entry.error = (entry.bytesUploaded === 0) ? CLOUD_MSG : (err.message || 'Upload failed');
         errorCount++;
         updateFileCard(entry);
         processQueue();
@@ -642,7 +686,7 @@
   }
 
   function retryUpload(entry) {
-    entry.status = 'queued';
+    entry.status = 'checking';
     entry.stallCount = 0;
     entry.progress = 0;
     entry.bytesUploaded = 0;
@@ -653,8 +697,11 @@
     entry.tusUpload = null;              // supersede: old instance's callbacks now ignored
     clearStallTimer(entry);
     if (old) { try { old.abort(); } catch (e) {} }
+    // Re-probe on retry: the usual reason to retry is that the user just downloaded
+    // the file out of Google Photos, so re-check rather than going straight back to
+    // tus and stalling for another ~3 minutes. verifyReadable() pumps the queue.
     updateFileCard(entry);
-    processQueue();
+    verifyReadable(entry);
   }
 
   // ─── Progress tracking ────────────────────────────────────────────
