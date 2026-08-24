@@ -556,6 +556,7 @@
 
   // ─── Stall detection ───────────────────────────────────────────────
   var STALL_TIMEOUT = 90000; // 90 seconds with no progress = stalled (raised from 30s — slow shop uploads of multi-GB files were tripping this mid-chunk)
+  var ZERO_BYTE_STALL_LIMIT = 8; // ~12 min of zero bytes before giving up (see handleStall)
   var MAX_STALL_RETRIES = 30; // raised from 5 — each retry resumes from the server's last offset, so they're cheap; large files on flaky connections were erroring out after 5 stalls
 
   function clearStallTimer(entry) {
@@ -570,9 +571,13 @@
   function handleStall(entry) {
     if (entry.status !== 'uploading') return;
     entry.stallCount = (entry.stallCount || 0) + 1;
-    // Not a single byte through after 2 stalls => unreadable cloud placeholder, not
-    // flaky Wi-Fi. 30 more resume attempts all restart from offset 0 and never finish.
-    if (entry.bytesUploaded === 0 && entry.stallCount >= 2) { clearStallTimer(entry); entry.status = 'error'; entry.error = CLOUD_MSG; errorCount++; updateFileCard(entry); processQueue(); return; }
+    // No bytes at all after ZERO_BYTE_STALL_LIMIT stalls => give up with actionable
+    // guidance rather than looping. Deliberately lenient: verifyReadable() has already
+    // proven the first 64KB is readable, so a true cloud placeholder is mostly ruled out
+    // by then, and iOS can legitimately take minutes to materialize a multi-GB iCloud
+    // video before the first byte ships (measured 7m41s for a 2.8GB .mov on 2026-08-24).
+    // A limit of 2 (~3 min) would have failed that healthy upload.
+    if (entry.bytesUploaded === 0 && entry.stallCount >= ZERO_BYTE_STALL_LIMIT) { clearStallTimer(entry); entry.status = 'error'; entry.error = CLOUD_MSG; errorCount++; updateFileCard(entry); processQueue(); return; }
     if (entry.stallCount > MAX_STALL_RETRIES) {
       // Give up after too many stalls (status='error' frees the slot via countActive)
       clearStallTimer(entry);
@@ -609,11 +614,18 @@
   // ─── Core TUS upload ──────────────────────────────────────────────
   function startUpload(entry) {
     entry.status = 'uploading';
-    entry.stallCount = 0;
     updateFileCard(entry);
 
     var fresh = !!entry.fresh;
     entry.fresh = false;
+    // Only an EXPLICIT user retry clears the stall budget. This used to reset
+    // unconditionally, which made both bailouts in handleStall() unreachable:
+    // every stall-restart routes back through startUpload(), so stallCount was
+    // always 1 when handleStall() re-tested it. MAX_STALL_RETRIES and the
+    // zero-byte bailout were dead code, and a wedged upload looped
+    // uploading -> stalled -> restart forever, showing 'Uploading... 0%' with no
+    // error and no guidance. onProgress() still zeroes it on real progress.
+    if (fresh) entry.stallCount = 0;
 
     var upload = new tus.Upload(entry.file, {
       endpoint: '/tus/',
